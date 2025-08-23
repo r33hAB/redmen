@@ -11,6 +11,8 @@ import MarketCard from "./components/MarketCard.jsx";
 import BubbleBoard from "./components/BubbleBoard.jsx";
 // keep this import
 import DetailsModal from "./components/DetailsModal.jsx";
+import BubbleHeatmap from "./components/BubbleHeatmap.jsx";
+
 
 function usd(n) {
   return n.toLocaleString(undefined, {
@@ -157,6 +159,7 @@ export default function App() {
   useEffect(() => { load(); }, []);
 
   // ----- Aggregations (crash‑proof) -----
+  // ----- Aggregations (with activityScore) -----
   const byMarket = useMemo(() => {
     try {
       const map = new Map();
@@ -210,10 +213,15 @@ export default function App() {
         map.set(key, entry);
       }
 
+      // finalize array: compute per‑market top bettors + activityScore
+      const now = Math.floor(Date.now() / 1000);
+      const ONE_HOUR = 3600;
+
       const arr = Array.from(map.values()).map((v) => {
         const tokenIds = Array.from(v.tokenIds);
-        const bettorMap = new Map();
 
+        // per‑market top bettors
+        const bettorMap = new Map();
         for (const tr of v.trades || []) {
           const id = tr?.name || "Anon";
           const e = bettorMap.get(id) || { id, buys: 0, sells: 0, trades: 0 };
@@ -222,7 +230,6 @@ export default function App() {
           e.trades += 1;
           bettorMap.set(id, e);
         }
-
         const topBettors = Array.from(bettorMap.values())
           .sort(
             (a, b) =>
@@ -231,7 +238,18 @@ export default function App() {
           )
           .slice(0, 10);
 
-        return { ...v, tokenIds, topBettors };
+        // recent activity score (hotness): recency‑weighted USD, ~30‑min half‑life
+        let recentUSD = 0;
+        for (const tr of v.trades || []) {
+          const ts = Number(tr?.timestamp) || 0;
+          const age = Math.max(0, now - ts);
+          const decay = Math.exp(-age / 1800); // 1800s ≈ 30 min
+          const inLastHour = age <= ONE_HOUR ? 1 : 0.35; // tiny credit if older than 1h
+          recentUSD += (Number(tr?.size) || 0) * decay * inLastHour;
+        }
+        const activityScore = recentUSD; // raw; heatmap will normalize across markets
+
+        return { ...v, tokenIds, topBettors, activityScore };
       });
 
       arr.sort(
@@ -292,6 +310,7 @@ export default function App() {
     loadPrice();
   }, [selectedMarket]);
 
+
   // ----- RENDER -----
   return (
     <div className="container">
@@ -308,6 +327,11 @@ export default function App() {
         <button className="primary" onClick={() => setView(view === "bubbles" ? "list" : "bubbles")}>
           {view === "bubbles" ? "List View" : "Bubble View"}
         </button>
+        // add a button in the header next to your other view toggles
+<button className="primary" onClick={() => setView(view === "heat" ? "bubbles" : "heat")}>
+  {view === "heat" ? "Bubble View" : "Heatmap View"}
+</button>
+
       </div>
 
       <div className="panel">
@@ -350,7 +374,17 @@ export default function App() {
               onSelect={(m) => setSelected(m?.slug ?? m)}
             />
           </div>
-        ) : (
+        )  : view === "heat" ? (
+  <div className="panel" style={{ marginTop: 12 }}>
+    <b>Activity Heatmap</b>
+    <BubbleHeatmap
+      markets={byMarket}
+      selectedSlug={selected}
+      onSelect={(m) => setSelected(m?.slug ?? m)}
+    />
+  </div>
+        )
+        : (
           <div className="panel">
             <div className="row" style={{ justifyContent: "space-between" }}>
               <b>Top Markets by Flow</b>
