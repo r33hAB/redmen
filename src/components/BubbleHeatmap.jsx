@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { forceSimulation, forceCollide, forceManyBody } from "d3-force";
 
+/**
+ * Free‑floating heat bubbles (same size).
+ * Fill = activityScore heat (green→red). Tooltip shows % split and unique buyers/sellers.
+ */
 export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) {
   const wrapRef = useRef(null);
   const [size, setSize] = useState({ w: 1024, h: 640 });
@@ -18,7 +22,6 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
     return () => ro.disconnect();
   }, []);
 
-  // same radius for all bubbles, sized to viewport + count
   const fixedR = useMemo(() => {
     const N = Math.max(1, markets.length);
     const area = size.w * size.h;
@@ -27,7 +30,6 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
     return Math.max(26, Math.min(86, r));
   }, [markets.length, size]);
 
-  // nodes with normalized heat (0..1)
   const nodes = useMemo(() => {
     if (!markets.length) return [];
     const maxA = Math.max(1, ...markets.map((m) => +m.activityScore || 0));
@@ -49,13 +51,11 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
   const simRef = useRef(null);
   const liveNodesRef = useRef([]);
 
-  // helpers
   const heatColor      = (t) => `hsl(${130 - 130 * t}, 90%, 55%)`;
   const heatColorOuter = (t) => `hsl(${130 - 130 * t}, 70%, 25%)`;
   const formatUSD = (n = 0) =>
     Number(n).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
-  // wall bounce (with slight damping)
   function bounce(n) {
     const R = n.r + 2;
     const left = R, right = size.w - R, top = R, bottom = size.h - R;
@@ -70,17 +70,16 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
 
     const simN = nodes.map((n) => ({ ...n }));
     const sim = forceSimulation(simN)
-      .velocityDecay(0.06)                                  // inertia / glide
-      .force("charge", forceManyBody().strength(-8))        // mild repulsion
+      .velocityDecay(0.06)
+      .force("charge", forceManyBody().strength(-8))
       .force("collide", forceCollide().radius(d => d.r + 2).strength(0.9).iterations(2))
       .alpha(1)
       .alphaDecay(0.006)
-      .alphaTarget(0.028);                                   // keep a little energy
+      .alphaTarget(0.028);
 
     simRef.current = sim;
     liveNodesRef.current = simN;
 
-    // slow “wind”
     let windPhase = Math.random() * Math.PI * 2;
     const windSpeed = 0.015;
 
@@ -92,23 +91,17 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
       const wy = windSpeed * Math.sin(windPhase);
 
       for (const n of simN) {
-        // micro‑drift
         n.vx += 0.018 * Math.sin(n._phase + t * 0.75);
         n.vy += 0.018 * Math.cos(n._phase + t * 0.75);
 
-        // global wind
-        n.vx += wx * 0.05;
-        n.vy += wy * 0.05;
-
-        // --- SOFT CONTAINMENT NEAR WALLS (no center gravity) ---
-        const margin = n.r * 1.6;    // start pulling back only when very close
-        const k = 0.0009;            // tiny inward pull strength
+        // soft containment near walls (no center gravity)
+        const margin = n.r * 1.6;
+        const k = 0.0009;
         if (n.x < margin)                 n.vx += (margin - n.x) * k;
         if (n.x > size.w - margin)        n.vx -= (n.x - (size.w - margin)) * k;
         if (n.y < margin)                 n.vy += (margin - n.y) * k;
         if (n.y > size.h - margin)        n.vy -= (n.y - (size.h - margin)) * k;
 
-        // cap speed
         const maxV = 1.4;
         const s = Math.hypot(n.vx, n.vy);
         if (s > maxV) { n.vx = (n.vx / s) * maxV; n.vy = (n.vy / s) * maxV; }
@@ -117,21 +110,14 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
       }
 
       if (!raf) {
-        raf = requestAnimationFrame(() => {
-          setSimNodes([...simN]);
-          raf = null;
-        });
+        raf = requestAnimationFrame(() => { setSimNodes([...simN]); raf = null; });
       }
     });
 
-    return () => {
-      sim.stop();
-      if (raf) cancelAnimationFrame(raf);
-      simRef.current = null;
-    };
+    return () => { sim.stop(); if (raf) cancelAnimationFrame(raf); simRef.current = null; };
   }, [nodes, size]);
 
-  // drag with click/drag threshold; pointermove gated by capture
+  // drag with capture‑only move + click/drag threshold
   const dragState = useRef({ startX: 0, startY: 0, dragging: false, activeId: null });
 
   function svgPointFromClient(target, e) {
@@ -148,33 +134,24 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
         e.preventDefault(); e.stopPropagation();
         e.currentTarget.setPointerCapture(e.pointerId);
         dragState.current = { startX: e.clientX, startY: e.clientY, dragging: false, activeId: e.pointerId };
-        node.vx = 0; node.vy = 0; // stop inertia while grabbed
+        node.vx = 0; node.vy = 0;
       },
       onPointerMove: (e) => {
-        // move ONLY if we have capture for this pointer
         if (!e.currentTarget.hasPointerCapture(e.pointerId) || dragState.current.activeId !== e.pointerId) return;
-
         const dx = e.clientX - dragState.current.startX;
         const dy = e.clientY - dragState.current.startY;
         if (Math.hypot(dx, dy) > 5) dragState.current.dragging = true;
-
         const { x, y } = svgPointFromClient(e.currentTarget, e);
         node.x = x; node.y = y;
-
-        // live paint
         setSimNodes([...liveNodesRef.current]);
       },
       onPointerUp: (e) => {
         if (e.currentTarget.hasPointerCapture(e.pointerId)) {
           try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
         }
-        // tiny toss
         node.vx += (Math.random() - 0.5) * 0.5;
         node.vy += (Math.random() - 0.5) * 0.5;
-
-        if (!dragState.current.dragging) {
-          onSelect && onSelect(node);
-        }
+        if (!dragState.current.dragging) onSelect && onSelect(node);
         dragState.current = { startX: 0, startY: 0, dragging: false, activeId: null };
         simRef.current && simRef.current.alphaTarget(0.035).restart();
         setTimeout(() => simRef.current && simRef.current.alphaTarget(0.028), 120);
@@ -208,6 +185,13 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
           const isSelected = b.slug === selectedSlug;
           const title = (b.title || b.slug || "Market").toString();
           const titleShort = title.length > 30 ? title.slice(0, 29) + "…" : title;
+
+          const buy = Math.max(0, +b.buys || 0);
+          const sell = Math.max(0, +b.sells || 0);
+          const tot = Math.max(1, buy + sell);
+          const buyPct = Math.round((buy / tot) * 100);
+          const sellPct = 100 - buyPct;
+
           const drag = makeDragHandlers(b);
 
           return (
@@ -235,6 +219,7 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) 
               </text>
               <title>
                 {title} — heat {Math.round(b.heat * 100)}% • flow {formatUSD(b.totalUSD)}
+                {`\nBuy ${buyPct}% (${b.uniqueBuyers || 0} unique) / Sell ${sellPct}% (${b.uniqueSellers || 0} unique)`}
               </title>
             </g>
           );

@@ -2,12 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * Props:
- *  - markets: [{ slug, title, totalUSD, buys, sells }]
+ *  - markets: [{ slug, title, totalUSD, buys, sells, uniqueBuyers, uniqueSellers }]
  *  - onSelect(market)
  *  - selectedSlug?: string
  */
 export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
-  // ---- measure available width to lay out responsively ----
+  // measure container for responsive grid
   const wrapRef = useRef(null);
   const [wrapW, setWrapW] = useState(1024);
 
@@ -15,28 +15,23 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
     if (!wrapRef.current) return;
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect?.width || 1024;
-      setWrapW(Math.max(320, Math.floor(w)));
+      setWrapW(Math.max(360, Math.floor(w)));
     });
     ro.observe(wrapRef.current);
     return () => ro.disconnect();
   }, []);
 
-  // Decide columns based on width; aim for 220–260px per cell
+  // columns / cell size
   const COLS = Math.max(2, Math.floor(wrapW / 240));
-  const CELL = Math.max(180, Math.floor(wrapW / COLS)); // actual cell size
-  const PADDING = 12; // inner cell padding around bubble
-  const LABEL_STACK = 44; // space for title+meta chips under bubble
+  const CELL = Math.max(180, Math.floor(wrapW / COLS));
+  const PADDING = 12;
+  const LABEL_STACK = 44;
 
-  // compute bubbles with radius scaling that fits inside the cell
   const bubbles = useMemo(() => {
     if (!markets.length) return [];
     const maxFlow = Math.max(...markets.map((m) => Math.max(1, Number(m.totalUSD) || 0)));
-    // The largest circle must leave room for ring (8px) + padding + labels
-    const MAX_R = Math.max(
-      28,
-      (CELL / 2) - PADDING - LABEL_STACK - 8 /* ring thickness margin */
-    );
-    const MIN_R = Math.min(36, MAX_R * 0.6); // keep small bubbles readable
+    const MAX_R = Math.max(28, (CELL / 2) - PADDING - LABEL_STACK - 8);
+    const MIN_R = Math.min(36, MAX_R * 0.6);
 
     return markets.map((m, i) => {
       const vol = Math.max(1, Number(m.totalUSD) || 1);
@@ -47,26 +42,35 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
       const sell = Math.max(0, Number(m.sells) || 0);
       const tot = Math.max(1, buy + sell);
       const buyPct = buy / tot;
-      const sellPct = 1 - buyPct;
 
       return {
         ...m,
         id: m.slug ?? i,
-        title: (m.title ?? String(m.slug ?? "Market")).toString(),
+        title: (m.title || String(m.slug || "Market")).toString(),
         r,
         buyPct,
-        sellPct,
       };
     });
   }, [markets, CELL]);
 
-  // SVG total height from rows
   const rows = Math.ceil((bubbles.length || 1) / COLS);
   const height = rows * CELL;
 
+  function formatUSD(n = 0) {
+    try {
+      return Number(n).toLocaleString(undefined, {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0
+      });
+    } catch {
+      return `$${Math.round(Number(n) || 0).toLocaleString()}`;
+    }
+  }
+
   return (
     <div ref={wrapRef} style={{ width: "100%" }}>
-      <svg width="100%" height={height} style={{ display: "block", background: "transparent" }}>
+      <svg width="100%" height={height} style={{ display: "block" }}>
         <defs>
           <filter id="selGlow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="0" stdDeviation="3" floodColor="#7aa2ff" floodOpacity="0.45" />
@@ -85,15 +89,18 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
 
           const isSelected = b.slug === selectedSlug;
 
-          // Chip text
           const titleMax = b.r < 56 ? 18 : 28;
           const title =
             b.title.length > titleMax ? b.title.slice(0, titleMax - 1) + "…" : b.title;
-          const meta = `${formatUSD(b.totalUSD)} • ${Math.round(b.buyPct * 100)}% / ${Math.round(b.sellPct * 100)}%`;
 
-          // Estimate chip widths (keeps them within the cell)
+          const buyP = Math.round(b.buyPct * 100);
+          const sellP = 100 - buyP;
+          const uniq = `${b.uniqueBuyers ?? 0}/${b.uniqueSellers ?? 0}`;
+
+          const meta = `${formatUSD(b.totalUSD)} • ${buyP}% / ${sellP}% • ${uniq}`;
+
           const titleW = clamp(72, CELL - 24, Math.round(title.length * 7 + 18));
-          const metaW  = clamp(72, CELL - 32, Math.round(meta.length * 6 + 18));
+          const metaW  = clamp(92, CELL - 20, Math.round(meta.length * 6 + 18));
 
           return (
             <g
@@ -102,7 +109,7 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
               style={{ cursor: "pointer" }}
               onClick={() => onSelect && onSelect(b)}
             >
-              {/* INNER DISC */}
+              {/* disc */}
               <circle
                 r={b.r}
                 fill="#1a2238"
@@ -111,7 +118,7 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
                 filter={isSelected ? "url(#selGlow)" : undefined}
               />
 
-              {/* PROPORTIONAL RING */}
+              {/* ring buy/sell */}
               <circle
                 r={b.r + 6}
                 fill="none"
@@ -132,16 +139,19 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
                 pathLength={c}
               />
 
-              {/* CENTER: keep only the split to avoid clutter */}
+              {/* center meta */}
               <text
                 textAnchor="middle"
                 dy="0.35em"
-                style={{ fontSize: Math.max(11, Math.min(14, Math.round(b.r / 8))), fill: "#9fb1db" }}
+                style={{
+                  fontSize: Math.max(11, Math.min(14, Math.round(b.r / 8))),
+                  fill: "#9fb1db"
+                }}
               >
                 {meta}
               </text>
 
-              {/* ALWAYS‑BELOW TITLE CHIP */}
+              {/* title chip (below) */}
               <rect
                 x={-titleW / 2}
                 y={b.r + 10}
@@ -160,7 +170,7 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
                 {title}
               </text>
 
-              {/* META CHIP (volume + %), also below, consistent across sizes */}
+              {/* meta chip (below) */}
               <rect
                 x={-metaW / 2}
                 y={b.r + 36}
@@ -179,9 +189,8 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
                 {meta}
               </text>
 
-              {/* Tooltip for full title */}
               <title>
-                {b.title} — {formatUSD(b.totalUSD)} • Buy {Math.round(b.buyPct * 100)}% / Sell {Math.round(b.sellPct * 100)}%
+                {b.title} — {formatUSD(b.totalUSD)} • Buy {buyP}% ({b.uniqueBuyers || 0} unique) / Sell {sellP}% ({b.uniqueSellers || 0} unique)
               </title>
             </g>
           );
@@ -191,16 +200,4 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
   );
 }
 
-/* ---------- helpers ---------- */
-function formatUSD(n = 0) {
-  try {
-    return Number(n).toLocaleString(undefined, {
-      style: "currency",
-      currency: "USD",
-      maximumFractionDigits: 0,
-    });
-  } catch {
-    return `$${Math.round(Number(n) || 0).toLocaleString()}`;
-  }
-}
 function clamp(min, max, v) { return Math.max(min, Math.min(max, v)); }

@@ -6,20 +6,23 @@ import {
   fetchAllClobMarkets,
   endpoints,
 } from "./lib/api.js";
+
 import DebugPanel from "./components/DebugPanel.jsx";
 import MarketCard from "./components/MarketCard.jsx";
 import BubbleBoard from "./components/BubbleBoard.jsx";
-// keep this import
-import DetailsModal from "./components/DetailsModal.jsx";
 import BubbleHeatmap from "./components/BubbleHeatmap.jsx";
-
+import DetailsModal from "./components/DetailsModal.jsx";
 
 function usd(n) {
-  return n.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
+  try {
+    return Number(n).toLocaleString(undefined, {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    });
+  } catch {
+    return `$${Math.round(Number(n) || 0).toLocaleString()}`;
+  }
 }
 
 export default function App() {
@@ -34,8 +37,7 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [showDebug, setShowDebug] = useState(false);
   const [selected, setSelected] = useState(null); // market slug key
-  const [showInfo, setShowInfo] = useState(false);
-  const [view, setView] = useState("bubbles"); // "bubbles" | "list"
+  const [view, setView] = useState("bubbles"); // "bubbles" | "list" | "heat"
 
   // debug logger
   function log(entry) {
@@ -63,15 +65,14 @@ export default function App() {
       // 2) All CLOB markets → index by condition_id
       const mkDataAll = await fetchAllClobMarkets();
 
-      // Build a fast lookup by conditionId
       const byCondition = new Map();
       for (const m of mkDataAll) {
-        const cid = m.condition_id != null ? String(m.condition_id) : null;
+        const cid = m?.condition_id != null ? String(m.condition_id) : null;
         if (!cid) continue;
         byCondition.set(cid, m);
       }
 
-      // Helper: strict sports check
+      // Strict sports check
       function isSportsMarket(meta, text = "") {
         const lc = (s) => String(s || "").toLowerCase();
         const hayParts = [
@@ -80,7 +81,6 @@ export default function App() {
           ...(Array.isArray(meta?.categories) ? meta.categories : []),
           ...(Array.isArray(meta?.tags) ? meta.tags : []), text
         ].filter(Boolean).map(lc);
-
         const hay = hayParts.join(" ");
 
         // hard excludes (geopolitics/news/etc.)
@@ -91,22 +91,18 @@ export default function App() {
         ];
         if (exclude.some((w) => hay.includes(w))) return false;
 
-        // vertical signal takes priority when provided
         if (lc(meta?.vertical) === "sports") return true;
 
-        // league/root whitelist
         const leagues = [
           "mlb","baseball","nba","basketball","nfl","football","nhl","hockey","soccer","mls",
           "epl","premier league","la liga","serie a","bundesliga","ncaaf","ncaab","ncaa",
-          "college","tennis","golf","mma","ufc","boxing","olympics","f1","formula 1",
-          "motogp","cricket","rugby"
+          "college","tennis","golf","mma","ufc","boxing","olympics","f1","formula 1","motogp",
+          "cricket","rugby"
         ];
         const roots = ["sport","sports"];
         const hasLeague = leagues.some((w) => hay.includes(w)) || roots.some((w) => hay.includes(w));
 
-        // title/slug patterns that look like sports
-        const likelySportsPattern =
-          /\bvs\.?\b|\bwin\b|\bmatch\b|\bgame\b|\bseries\b|\bfinal\b|\bround\b/i.test(text);
+        const likelySportsPattern = /\bvs\.?\b|\bwin\b|\bmatch\b|\bgame\b|\bseries\b|\bfinal\b|\bround\b/i.test(text);
 
         return hasLeague || likelySportsPattern;
       }
@@ -156,18 +152,15 @@ export default function App() {
     }
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, []); // initial load
 
-  // ----- Aggregations (crash‑proof) -----
-  // ----- Aggregations (with activityScore) -----
+  // ----- Aggregations (with activityScore + unique counts) -----
   const byMarket = useMemo(() => {
     try {
       const map = new Map();
 
       for (const t of Array.isArray(trades) ? trades : []) {
-        // defensive reads
-        const key =
-          (t && (t.slug || t.title || String(t.conditionId ?? ""))) || "unknown";
+        const key = (t && (t.slug || t.title || String(t.conditionId ?? ""))) || "unknown";
         const title = (t && t.title) || key || "Unknown market";
         const eventSlug = (t && t.eventSlug) || "";
 
@@ -180,47 +173,55 @@ export default function App() {
             buys: 0,
             sells: 0,
             lastTs: 0,
-            outcomes: {},      // { [label]: { usd, count } }
+            outcomes: {},
             tradeCount: 0,
             tokenIds: new Set(),
-            trades: [],        // compact per‑market trades for details
+            trades: [],
           };
 
         const size = Number(t?.size) || 0;
-        if ((t?.side) === "BUY") entry.buys += size;
-        else if ((t?.side) === "SELL") entry.sells += size;
+        if (t?.side === "BUY") entry.buys += size;
+        else if (t?.side === "SELL") entry.sells += size;
         entry.totalUSD += size;
         entry.tradeCount += 1;
         entry.lastTs = Math.max(entry.lastTs, Number(t?.timestamp) || 0);
 
-        const outcomeLabel =
-          (t?.outcome) || `Outcome ${t?.outcomeIndex ?? "?"}`;
-        if (!entry.outcomes[outcomeLabel])
-          entry.outcomes[outcomeLabel] = { usd: 0, count: 0 };
+        const outcomeLabel = (t?.outcome) || `Outcome ${t?.outcomeIndex ?? "?"}`;
+        if (!entry.outcomes[outcomeLabel]) entry.outcomes[outcomeLabel] = { usd: 0, count: 0 };
         entry.outcomes[outcomeLabel].usd += size;
         entry.outcomes[outcomeLabel].count += 1;
 
         if (t?.asset) entry.tokenIds.add(t.asset);
 
+        const traderId = t?.name || t?.pseudonym || t?.proxyWallet || "Anon";
         entry.trades.push({
           side: t?.side || "BUY",
           size,
           timestamp: Number(t?.timestamp) || 0,
-          name: t?.name || t?.pseudonym || t?.proxyWallet || "Anon",
+          name: traderId,
           outcome: outcomeLabel,
         });
 
         map.set(key, entry);
       }
 
-      // finalize array: compute per‑market top bettors + activityScore
       const now = Math.floor(Date.now() / 1000);
       const ONE_HOUR = 3600;
 
       const arr = Array.from(map.values()).map((v) => {
         const tokenIds = Array.from(v.tokenIds);
 
-        // per‑market top bettors
+        // unique traders per side
+        const uniqBuy = new Set();
+        const uniqSell = new Set();
+        for (const tr of v.trades || []) {
+          if (tr.side === "BUY") uniqBuy.add(tr.name);
+          else if (tr.side === "SELL") uniqSell.add(tr.name);
+        }
+        const uniqueBuyers = uniqBuy.size;
+        const uniqueSellers = uniqSell.size;
+
+        // per-market top bettors
         const bettorMap = new Map();
         for (const tr of v.trades || []) {
           const id = tr?.name || "Anon";
@@ -231,11 +232,7 @@ export default function App() {
           bettorMap.set(id, e);
         }
         const topBettors = Array.from(bettorMap.values())
-          .sort(
-            (a, b) =>
-              (Number(b.buys) + Number(b.sells)) -
-              (Number(a.buys) + Number(a.sells))
-          )
+          .sort((a, b) => (Number(b.buys) + Number(b.sells)) - (Number(a.buys) + Number(a.sells)))
           .slice(0, 10);
 
         // recent activity score (hotness): recency‑weighted USD, ~30‑min half‑life
@@ -244,20 +241,17 @@ export default function App() {
           const ts = Number(tr?.timestamp) || 0;
           const age = Math.max(0, now - ts);
           const decay = Math.exp(-age / 1800); // 1800s ≈ 30 min
-          const inLastHour = age <= ONE_HOUR ? 1 : 0.35; // tiny credit if older than 1h
+          const inLastHour = age <= ONE_HOUR ? 1 : 0.35; // small credit if older
           recentUSD += (Number(tr?.size) || 0) * decay * inLastHour;
         }
-        const activityScore = recentUSD; // raw; heatmap will normalize across markets
+        const activityScore = recentUSD;
 
-        return { ...v, tokenIds, topBettors, activityScore };
+        return { ...v, tokenIds, topBettors, activityScore, uniqueBuyers, uniqueSellers };
       });
 
-      arr.sort(
-        (a, b) => (Number(b.totalUSD) || 0) - (Number(a.totalUSD) || 0)
-      );
+      arr.sort((a, b) => (Number(b.totalUSD) || 0) - (Number(a.totalUSD) || 0));
       return arr.slice(0, 50);
     } catch (e) {
-      // Don’t crash the app; surface the error and return an empty list
       console.error("byMarket memo failed:", e);
       return [];
     }
@@ -280,7 +274,7 @@ export default function App() {
     return arr.slice(0, 25);
   }, [trades]);
 
-  // Selected market (safe)
+  // Selected market
   const selectedMarket = useMemo(() => {
     if (!selected) return null;
     return (byMarket || []).find((m) => m.slug === selected) || null;
@@ -310,8 +304,6 @@ export default function App() {
     loadPrice();
   }, [selectedMarket]);
 
-
-  // ----- RENDER -----
   return (
     <div className="container">
       <div className="header">
@@ -320,18 +312,19 @@ export default function App() {
         <span className="badge">Sports only</span>
         <span className="badge">≥ ${minCash}</span>
 
-        <button className="primary" onClick={() => setShowInfo(true)} aria-haspopup="dialog">Info</button>
         <button className="primary" onClick={() => setShowDebug((s) => !s)}>
           {showDebug ? "Hide" : "Show"} Debug
         </button>
-        <button className="primary" onClick={() => setView(view === "bubbles" ? "list" : "bubbles")}>
-          {view === "bubbles" ? "List View" : "Bubble View"}
-        </button>
-        // add a button in the header next to your other view toggles
-<button className="primary" onClick={() => setView(view === "heat" ? "bubbles" : "heat")}>
-  {view === "heat" ? "Bubble View" : "Heatmap View"}
-</button>
 
+        <button className="primary" onClick={() => setView("bubbles")} disabled={view === "bubbles"}>
+          Bubble View
+        </button>
+        <button className="primary" onClick={() => setView("list")} disabled={view === "list"}>
+          List View
+        </button>
+        <button className="primary" onClick={() => setView("heat")} disabled={view === "heat"}>
+          Heatmap View
+        </button>
       </div>
 
       <div className="panel">
@@ -368,23 +361,13 @@ export default function App() {
         {view === "bubbles" ? (
           <div className="panel" style={{ marginTop: 12 }}>
             <b>Bubble Dashboard</b>
-            {/* IMPORTANT: wrapper ensures we pass a slug even if bubble sends an object */}
             <BubbleBoard
-              markets={Array.isArray(byMarket) ? byMarket : []}
+              markets={byMarket}
               onSelect={(m) => setSelected(m?.slug ?? m)}
+              selectedSlug={selected}
             />
           </div>
-        )  : view === "heat" ? (
-  <div className="panel" style={{ marginTop: 12 }}>
-    <b>Activity Heatmap</b>
-    <BubbleHeatmap
-      markets={byMarket}
-      selectedSlug={selected}
-      onSelect={(m) => setSelected(m?.slug ?? m)}
-    />
-  </div>
-        )
-        : (
+        ) : view === "list" ? (
           <div className="panel">
             <div className="row" style={{ justifyContent: "space-between" }}>
               <b>Top Markets by Flow</b>
@@ -397,6 +380,15 @@ export default function App() {
               {byMarket.length === 0 && <div className="small">No trades found for your filters.</div>}
             </div>
           </div>
+        ) : (
+          <div className="panel" style={{ marginTop: 12 }}>
+            <b>Activity Heatmap</b>
+            <BubbleHeatmap
+              markets={byMarket}
+              onSelect={(m) => setSelected(m?.slug ?? m)}
+              selectedSlug={selected}
+            />
+          </div>
         )}
       </div>
 
@@ -404,15 +396,15 @@ export default function App() {
         <b>Top Bettors (by $ flow)</b>
         <div className="list" style={{ marginTop: 8 }}>
           {topBettors.map((u) => {
-            const total = (u.buys || 0) + (u.sells || 0);
-            const bias = total > 0 ? ((u.buys || 0) - (u.sells || 0)) / total : 0;
+            const total = u.buys + u.sells;
+            const bias = total > 0 ? (u.buys - u.sells) / total : 0;
             return (
               <div className="item" key={u.id}>
                 <div>
                   <div className="market-title">{u.id}</div>
                   <div className="chips" style={{ marginTop: 6 }}>
                     <span className="badge">${total.toFixed(0)} total</span>
-                    <span className="badge">Trades: {u.count || 0}</span>
+                    <span className="badge">Trades: {u.count}</span>
                   </div>
                 </div>
                 <div className="right small" style={{ color: bias >= 0 ? "var(--good)" : "var(--bad)" }}>
@@ -435,7 +427,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* MODAL: replaces the old inline panel */}
+      {/* Modal for the selected market */}
       {selectedMarket && (
         <DetailsModal
           market={selectedMarket}
