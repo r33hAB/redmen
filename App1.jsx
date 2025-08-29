@@ -10,7 +10,7 @@ import {
 import DebugPanel from "./components/DebugPanel.jsx";
 import MarketCard from "./components/MarketCard.jsx";
 import BubbleBoard from "./components/BubbleBoard.jsx";
-import BubbleHeatmap from "./components/BubbleHeatMap.jsx";
+import BubbleHeatmap from "./components/BubbleHeatmap.jsx";
 import DetailsModal from "./components/DetailsModal.jsx";
 
 function usd(n) {

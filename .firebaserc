@@ -1,0 +1,22 @@
+{
+  "projects": {
+    "default": "bubldex"
+  },
+  "targets": {
+    "redmen-mvp": {
+      "hosting": {
+        "beta": [
+          "redmen-beta"
+        ]
+      }
+    },
+    "bubldex": {
+      "hosting": {
+        "beta": [
+          "redmen-beta"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
