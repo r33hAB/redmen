@@ -1,0 +1,25 @@
+{
+  "generatedAt": "2025-08-31T20:49:51.552Z",
+  "highlights": [
+    {
+      "type": "MARKET_SURGE",
+      "key": "MARKET_SURGE:0xf3c850fe192242210c313773a967b306e57777aa17f184b78cad1c2165883131",
+      "marketId": "0xf3c850fe192242210c313773a967b306e57777aa17f184b78cad1c2165883131",
+      "marketTitle": "UFC Fight Night: Pitbull vs. Keita ",
+      "totalUsd": 882,
+      "count": 1,
+      "buysUsd": 882,
+      "sellsUsd": 0
+    },
+    {
+      "type": "MARKET_SURGE",
+      "key": "MARKET_SURGE:0x8dfe73c062b42bc906c4b8af7a79826d31a5444f138005e0df5b228c41c4f597",
+      "marketId": "0x8dfe73c062b42bc906c4b8af7a79826d31a5444f138005e0df5b228c41c4f597",
+      "marketTitle": "Will Max Verstappen win the 2025 F1 Dutch Grand Prix?",
+      "totalUsd": 157,
+      "count": 1,
+      "buysUsd": 157,
+      "sellsUsd": 0
+    }
+  ]
+}
