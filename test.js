@@ -1,200 +1,587 @@
 #!/usr/bin/env node
+/**
+ * Polymarket Sports Activity Mirror — FAST + NO-MISS (global window backstop)
+ *
+ * What’s new vs prior:
+ *  - Full SPORTS universe (eventIds + conditionIds) from Gamma for filtering.
+ *  - Optional GLOBAL WINDOW SCAN (DESC) until SINCE: catches any market we missed.
+ *  - Configurable cold-skip heuristic (disable with --coldSkipHours=0).
+ *  - Larger MAX_TARGETS allowed (up to 1000) for market-batch pass.
+ *  - Robust concurrent queue; no index rewind; tasks always finish.
+ */
+
 const BASE_GAMMA = "https://gamma-api.polymarket.com";
 const BASE_DATA  = "https://data-api.polymarket.com";
 
 // ---------- CLI ----------
 const args = Object.fromEntries(process.argv.slice(2).map(a=>{
-  const m=a.match(/^--([^=]+)=(.*)$/); return m ? [m[1], m[2]] : [a.replace(/^--/,'') , true];
+  const m=a.match(/^--([^=]+)=(.*)$/);
+  return m ? [m[1], m[2]] : [a.replace(/^--/,'') , true];
 }));
-const HOURS   = args.allTime ? null : Number(args.hours ?? 24);
-const LIMIT   = Math.min(Math.max(Number(args.limit ?? 10000), 1), 10000);
-const OUTFILE = String(args.outfile ?? "sports-activity.json");
-const TAG     = String(args.tag ?? "sports");
-const INCLUDE_INACTIVE = !!args.includeInactive;
-const SINCE   = HOURS == null ? 0 : Math.floor(Date.now()/1000) - HOURS*3600;
+
+const FAST             = String(args.fast ?? "true").toLowerCase()==="true";
+const HOURS            = args.allTime ? null : Number(args.hours ?? 24);
+const SINCE            = HOURS==null ? 0 : Math.floor(Date.now()/1000) - HOURS*3600;
+const TAKER_ONLY       = (String(args.takerOnly ?? "false").toLowerCase()==="true");
+const MIN_CASH         = Number(args.minCash ?? 100);
+
+const LIMIT_PAGE       = Math.min(Math.max(Number(args.limitPage ?? 300), 1), 500);
+const OVERLAP          = Math.min(Math.max(Number(args.overlap ?? 50), 0), Math.max(0, LIMIT_PAGE-1));
+const MARKET_BATCH     = Math.min(Math.max(Number(args.marketBatch ?? 12), 1), 25);
+const CONCURRENCY      = Math.min(Math.max(Number(args.concurrency ?? 8), 1), 16);
+
+const SEED_LIMIT       = Math.min(Math.max(Number(args.seedLimit ?? 500), 1), 500);
+const SEED_MAX_PAGES   = Math.min(Math.max(Number(args.seedMaxPages ?? 3), 0), 100);
+const SEED_UNTIL_SINCE = String(args.seedUntilSince ?? "false").toLowerCase()==="true";
+
+const PARANOIA_PAGES   = Math.max(Number(args.paranoiaPages ?? 1), 0);
+const MAX_OFFSET       = Math.min(Math.max(Number(args.maxOffset ?? 10000), 1000), 10000);
+
+const OUTFILE          = String(args.outfile ?? "sports-activity.json");
+const META_OUT         = String(args.metaOut ?? "meta.json");
+const TAG_SLUG         = String(args.tag ?? "sports");
+
+const MAX_TARGETS      = Math.min(Math.max(Number(args.maxTargets ?? 350), 50), 1000);
+const COLD_SKIP_HOURS  = Number(args.coldSkipHours ?? 6); // 0 disables
+const GLOBAL_WINDOW    = String(args.globalWindowScan ?? "false").toLowerCase()==="true";
+
+const MAX_MS           = Math.min(Math.max(Number(args.maxMs ?? 300000), 60000), 600000);
+const MAX_REQUESTS     = Math.min(Math.max(Number(args.maxRequests ?? 2000), 100), 10000);
+
+// ---------- HTTP (undici keep-alive) ----------
+import { Agent, setGlobalDispatcher } from "undici";
+const agent = new Agent({ connections: 64, pipelining: 8, keepAliveTimeout: 10_000, keepAliveMaxTimeout: 15_000 });
+setGlobalDispatcher(agent);
+
+let EMA = 0;
+let REQUESTS = 0;
+const HARD_TIMEOUT_MS  = 30_000; // general
+const PROBE_TIMEOUT_MS =  8_000; // probe-only
+const RETRIES = 4;
+const BACKOFF_MS = 700;
+
+async function getJsonOnce(url, { timeout=HARD_TIMEOUT_MS } = {}){
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), timeout);
+  const headers = {
+    "accept": "application/json",
+    "accept-encoding": "gzip, br",
+    "x-requested-with": "redmen-fast"
+  };
+  try{
+    const t0=Date.now();
+    const res=await fetch(url, { headers, signal: ctrl.signal });
+    const ms=Date.now()-t0;
+    EMA = EMA===0 ? ms : Math.round(0.25*ms + 0.75*EMA);
+    REQUESTS++;
+    if(!res.ok){
+      const text=await res.text().catch(()=> "");
+      console.error(`API_ERR code=${res.status} ms=${ms} url=${url} body=${text.slice(0,160).replace(/\s+/g,' ')}`);
+      const err = new Error(`HTTP_${res.status}`); err.code=res.status; throw err;
+    }
+    return { json: await res.json(), ms };
+  } finally{
+    clearTimeout(timer);
+  }
+}
+async function safeGetJson(url, opt={}){
+  for(let a=1; a<=RETRIES; a++){
+    try{
+      const out = await getJsonOnce(url, opt);
+      return { ...out, ok:true, aborted:false, attempt:a };
+    }catch(e){
+      const aborted = (e?.name==="AbortError") || (e?.code===524) || String(e?.message||"").includes("AbortError");
+      if(a<RETRIES){
+        const delay = BACKOFF_MS * Math.pow(2, a-1);
+        console.error(`  retry attempt=${a} in ${delay}ms (${aborted?'AbortError':(e?.code||e?.message||'err')})`);
+        await new Promise(r=>setTimeout(r, delay));
+        continue;
+      }
+      return { json:null, ok:false, aborted, err:e, attempt:a };
+    }
+  }
+  return { json:null, ok:false, aborted:true, err:new Error("unknown") };
+}
 
 // ---------- utils ----------
-async function getJson(url, attempt=1){
-  const MAX=4, BACKOFF=700;
-  try{
-    const t0=Date.now(); const res=await fetch(url,{headers:{accept:"application/json"}});
-    const ms=Date.now()-t0;
-    if(!res.ok){ const text=await res.text().catch(()=> ""); throw new Error(`HTTP ${res.status} @ ${url} :: ${text.slice(0,180)} (${ms}ms)`); }
-    const json=await res.json(); return { json, ms };
-  }catch(e){
-    if(attempt<MAX){ await new Promise(r=>setTimeout(r,BACKOFF*Math.pow(2,attempt-1))); return getJson(url, attempt+1); }
-    throw e;
-  }
+async function savePretty(path, data){
+  const fs=await import("node:fs/promises");
+  await fs.writeFile(path, JSON.stringify(data,null,2));
 }
-async function savePretty(path, data){ const fs=await import("node:fs/promises"); await fs.writeFile(path, JSON.stringify(data,null,2)); }
-function toSec(x){ if(!x) return 0; if(typeof x==="number") return x>1e12?Math.floor(x/1000):Math.floor(x);
+function toSec(x){
+  if(!x) return 0;
+  if(typeof x==="number") return x>1e12?Math.floor(x/1000):Math.floor(x);
   const n=Number(x); if(!Number.isNaN(n)) return n>1e12?Math.floor(n/1000):Math.floor(n);
-  const d=new Date(x); return Number.isNaN(d.getTime())?0:Math.floor(d.getTime()/1000); }
+  const d=new Date(x); return Number.isNaN(d.getTime())?0:Math.floor(d.getTime()/1000);
+}
 function fmt(n){ const x=Number(n); return Number.isFinite(x)?x.toLocaleString():String(n); }
-function bar(p, width = 24){ if(!Number.isFinite(p)) p=0; p=Math.max(0,Math.min(1,p));
-  const filled=Math.round(p*width), block=process.platform==="win32"?"#":"█";
-  return `[${block.repeat(filled)}${" ".repeat(width-filled)}]`; }
+function bar(p, w=24){ if(!Number.isFinite(p)) p=0; p=Math.max(0,Math.min(1,p)); const f=Math.round(p*w); const b=process.platform==="win32"?"#":"█"; return `[${b.repeat(f)}${" ".repeat(w-f)}]`; }
+function byDesc(a,b){ return b-a; }
+
+// dedupe
+function dedupeKey(t){
+  const id = t.id ?? t.tradeId;
+  if(id!=null) return `id:${String(id)}`;
+  const tx=(t.transactionHash||"").toLowerCase();
+  const li=t.logIndex!=null?String(t.logIndex):"";
+  if(tx) return `tx:${tx}|li:${li}`;
+  const cid=(t.conditionId||t.market||t.asset||"").toLowerCase();
+  const oi=t.outcomeIndex!=null?String(t.outcomeIndex):"";
+  const side=t.side??"";
+  const sz=t.size??t.amount??"";
+  const px=t.price??"";
+  const w=(t.proxyWallet||"").toLowerCase();
+  const ts=toSec(t.timestamp??t.ts);
+  return `ts:${ts}|cid:${cid}|oi:${oi}|side:${side}|sz:${sz}|px:${px}|w:${w}`;
+}
 function dedupe(rows){
-  const seen=new Set(), out=[];
+  const seen=new Set(), out=[]; let drops=0, samples=[];
   for(const t of rows){
-    const key = t.id ?? t.tradeId ??
-      (t.transactionHash ? `${t.transactionHash}|${t.logIndex ?? ""}` :
-       `${t.timestamp ?? ""}|${t.market ?? t.asset ?? ""}|${t.side ?? ""}|${t.size ?? ""}|${t.price ?? ""}`);
-    if(!seen.has(key)){ seen.add(key); out.push(t); }
+    const key=dedupeKey(t);
+    if(seen.has(key)){ drops++; if(samples.length<3) samples.push(key); }
+    else{ seen.add(key); out.push(t); }
   }
-  return out;
+  return { out, drops, unique: seen.size, samples };
 }
 
-// ---------- SPORTS universe: slugs + conditionIds ----------
-async function buildSportsUniverse(tagSlug, includeInactive){
-  console.error(`[1/4] Gamma: resolve tag "${tagSlug}"…`);
-  const { json: tag } = await getJson(`${BASE_GAMMA}/tags/slug/${encodeURIComponent(tagSlug)}`);
-  const tagId = tag?.id ?? tag?.data?.id;
-  if (!tagId) throw new Error(`Cannot resolve tag id for "${tagSlug}"`);
-
-  const slugs = new Set();
-  const cids  = new Set();
-
-  // Events by tag -> slugs
-  console.error(`[1.5/4] Gamma: events by tag_id=${tagId} ${includeInactive?"(active+inactive)":"(active only)"}…`);
-  const LIMIT_EV=200;
-  for (const active of includeInactive ? [true,false] : [true]){
-    let off=0, page=0;
-    for(;;){
-      page++;
-      const u = new URL(`${BASE_GAMMA}/events`);
-      u.searchParams.set("tag_id", String(tagId));
-      u.searchParams.set("limit", String(LIMIT_EV));
-      u.searchParams.set("offset", String(off));
-      if (active!==false) u.searchParams.set("active","true");
-      const { json: arr, ms } = await getJson(u.toString());
-      if (!Array.isArray(arr) || arr.length===0){ if(page===1) console.error(`    (no events, ${ms}ms)`); break; }
-      let add=0;
-      for (const ev of arr){ if (ev?.slug && !slugs.has(ev.slug)){ slugs.add(ev.slug); add++; } }
-      console.error(`    page ${page} off=${off} got=${fmt(arr.length)} add=${fmt(add)} cumSlugs=${fmt(slugs.size)} ms=${ms}`);
-      if (arr.length < LIMIT_EV) break;
-      off += LIMIT_EV;
+// coverage stats
+const PAGE_STATS=[];
+function pageStatPush({page, offset, rows, kept}){
+  let oldest=Infinity, newest=-Infinity, flips=false;
+  for(let i=0;i<rows.length;i++){
+    const ts=toSec(rows[i].timestamp??rows[i].ts);
+    if(ts){ oldest=Math.min(oldest, ts); newest=Math.max(newest, ts); }
+    if(i>0){
+      const prev=toSec(rows[i-1].timestamp??rows[i-1].ts);
+      if(prev && ts && prev < ts) flips=true; // expect DESC
     }
   }
+  PAGE_STATS.push({ page, offset, got: rows.length, kept, oldest, newest, flips });
+}
+function printPageSample(){
+  const flipsCount = PAGE_STATS.filter(p => p.flips).length;
+  console.error(`pages=${PAGE_STATS.length} flips=${flipsCount} emaMs=${EMA}`);
+  console.error("page.sample", PAGE_STATS.slice(0,3), "...", PAGE_STATS.slice(-3));
+}
 
-  // Markets by tag -> conditionIds (+ eventSlug just in case)
-  console.error(`[1.6/4] Gamma: markets by tag_id=${tagId} (collect conditionIds + any extra slugs)…`);
-  const LIMIT_MK=200; let moff=0, mpage=0;
+// ---------- Gamma: SPORTS universe ----------
+async function getSportsTagId(slug){
+  const { json, ok } = await safeGetJson(`${BASE_GAMMA}/tags/slug/${encodeURIComponent(slug)}`);
+  if(!ok || !json?.id) throw new Error(`Tag not found: ${slug}`);
+  return json.id;
+}
+async function buildSportsUniverse(tagId){
+  const slugs=new Set(); const eids=new Set(); const cids=new Set();
+  // events
+  const LIMIT_EV=200; let off=0;
   for(;;){
-    mpage++;
-    const u = new URL(`${BASE_GAMMA}/markets`);
+    const u=new URL(`${BASE_GAMMA}/events`);
     u.searchParams.set("tag_id", String(tagId));
+    u.searchParams.set("limit", String(LIMIT_EV));
+    u.searchParams.set("offset", String(off));
+    u.searchParams.set("active", "true"); // sports activity = active events
+    const { json: arr } = await safeGetJson(u.toString());
+    if(!Array.isArray(arr) || arr.length===0) break;
+    for(const ev of arr){
+      if(ev?.slug) slugs.add(ev.slug);
+      if(ev?.id!=null) eids.add(ev.id);
+    }
+    if(arr.length<LIMIT_EV) break;
+    off += LIMIT_EV;
+    if(off>40_000) break; // hard stop
+  }
+  // markets (collect conditionIds, extra slugs/eids)
+  const LIMIT_MK=200; let moff=0;
+  for(;;){
+    const u=new URL(`${BASE_GAMMA}/markets`);
+    u.searchParams.set("tag_id", String(tagId));
+    u.searchParams.set("active","true");
     u.searchParams.set("limit", String(LIMIT_MK));
     u.searchParams.set("offset", String(moff));
-    if (!includeInactive) u.searchParams.set("active","true");
-    const { json: arr, ms } = await getJson(u.toString());
-    if (!Array.isArray(arr) || arr.length===0){ if(mpage===1) console.error(`    (no markets, ${ms}ms)`); break; }
-    let addC=0, addS=0;
-    for (const m of arr){
-      const cid = m?.conditionId || m?.condition_id || m?.questionID || m?.clobTokenId;
-      if (cid){ const s=String(cid).toLowerCase(); if(/^0x[0-9a-f]{64}$/.test(s) && !cids.has(s)){ cids.add(s); addC++; } }
-      const slug = m?.eventSlug || m?.event_slug || m?.event?.slug;
-      if (slug && !slugs.has(slug)){ slugs.add(slug); addS++; }
+    const { json: arr } = await safeGetJson(u.toString());
+    if(!Array.isArray(arr) || arr.length===0) break;
+    for(const m of arr){
+      const cid=(m?.conditionId||m?.condition_id||m?.questionID||m?.clobTokenId||"").toLowerCase();
+      if(/^0x[0-9a-f]{64}$/.test(cid)) cids.add(cid);
+      if(m?.event?.slug) slugs.add(m.event.slug);
+      const evId = m?.eventId ?? m?.event_id ?? m?.event?.id;
+      if(evId!=null) eids.add(evId);
     }
-    console.error(`    page ${mpage} off=${moff} got=${fmt(arr.length)} addCID=${fmt(addC)} addSlugs=${fmt(addS)} cumCID=${fmt(cids.size)} cumSlugs=${fmt(slugs.size)} ms=${ms}`);
-    if (arr.length < LIMIT_MK) break;
+    if(arr.length<LIMIT_MK) break;
     moff += LIMIT_MK;
+    if(moff>40_000) break;
   }
-
-  if (slugs.size===0 && cids.size===0) throw new Error("No sports identifiers collected.");
-  return { slugs, cids };
+  return { slugs, eids, cids };
 }
 
-// ---------- Global /trades (maker+taker) with dual filter ----------
-async function fetchGlobalTradesFiltered(universe){
-  console.error(`[2/4] Data-API: /trades (GLOBAL) CASH>=100 ${HOURS==null?'(allTime)':`(last ${HOURS}h)`} limit=${LIMIT} (maker + taker)`);
-  let offset=0, page=0, keep=[], ema=0; const alpha=0.25;
-  let sort=null, baseDelta=null, last=0;
-  const print = s=>{ const pad=Math.max(0,last-s.length); process.stderr.write('\r'+s+' '.repeat(pad)); last=s.length; };
-  const end = ()=>{ process.stderr.write('\n'); last=0; };
+// ---------- HOT markets (Gamma) ----------
+async function getRecentSportsMarkets(tagId, want){
+  const ids = new Map(); // cid -> { eventId, updatedAt, volume24hr }
+  async function scan(orderField){
+    const LIMIT=200; let off=0;
+    for(;;){
+      const u=new URL(`${BASE_GAMMA}/markets`);
+      u.searchParams.set("tag_id", String(tagId));
+      u.searchParams.set("active","true");
+      u.searchParams.set("limit", String(LIMIT));
+      u.searchParams.set("offset", String(off));
+      u.searchParams.set("order", orderField);
+      u.searchParams.set("ascending","false");
+      const { json: arr } = await safeGetJson(u.toString());
+      if(!Array.isArray(arr) || arr.length===0) break;
+      for(const m of arr){
+        const cid=(m?.conditionId||m?.condition_id||m?.questionID||m?.clobTokenId||"").toLowerCase();
+        if(!/^0x[0-9a-f]{64}$/.test(cid)) continue;
+        const evId=m?.eventId ?? m?.event_id ?? m?.event?.id ?? null;
+        const updatedAt=toSec(m?.updatedAt);
+        const vol24=Number(m?.volume24hr ?? m?.volume24hrClob ?? 0) || 0;
+        const prev=ids.get(cid);
+        if(!prev || vol24>(prev.volume24hr||0) || updatedAt>(prev.updatedAt||0)){
+          ids.set(cid,{eventId:evId, updatedAt, volume24hr:vol24});
+        }
+      }
+      if(ids.size>=want && orderField==="volume24hr") break;
+      if(arr.length<LIMIT) break;
+      off += LIMIT;
+    }
+  }
+  await scan("volume24hr");
+  if(ids.size < want/2) await scan("updatedAt");
+  const ranked=[...ids.entries()].sort((a,b)=>{
+    const A=a[1], B=b[1];
+    const v=(B.volume24hr||0)-(A.volume24hr||0);
+    return v!==0? v : (B.updatedAt||0)-(A.updatedAt||0);
+  }).map(([cid,meta])=>({cid, ...meta}));
+  return ranked.slice(0, want);
+}
 
-  // fast membership lookups
-  const inSlug = s => !!s && universe.slugs.has(s);
-  const inCid  = x => !!x && universe.cids.has(String(x).toLowerCase());
+// ---------- seed from global head ----------
+async function seedHotFromGlobal(){
+  console.error(`[0/4] Seeding hot IDs from global head: limit=${SEED_LIMIT}, maxPages=${SEED_MAX_PAGES}, untilSince=${SEED_UNTIL_SINCE}`);
+  let offset=0;
+  const hotMarkets=new Set(), hotEvents=new Set();
+  for(let page=1; page<=SEED_MAX_PAGES; page++){
+    const u=new URL(`${BASE_DATA}/trades`);
+    u.searchParams.set("limit", String(SEED_LIMIT));
+    u.searchParams.set("offset", String(offset));
+    u.searchParams.set("takerOnly", String(false));
+    u.searchParams.set("filterType","CASH");
+    u.searchParams.set("filterAmount", String(MIN_CASH));
+    const { json: rows } = await safeGetJson(u.toString());
+    if(!Array.isArray(rows) || rows.length===0) break;
+
+    const ts = rows.map(r=>toSec(r.timestamp||r.ts)).sort(byDesc);
+    const oldest = Math.min(...ts), newest=Math.max(...ts);
+
+    let km=0, ke=0;
+    for(const r of rows){
+      const cid=(r.market||r.asset||r.conditionId||"").toLowerCase();
+      if(/^0x[0-9a-f]{64}$/.test(cid)){ hotMarkets.add(cid); km++; }
+      const ev = r.eventId ?? r.event_id ?? null;
+      if(ev!=null){ hotEvents.add(ev); ke++; }
+    }
+    console.error(`  seed page ${page} off=${offset} got=${fmt(rows.length)} kept=${fmt(rows.length)} oldest=${oldest} (${new Date(oldest*1e3).toISOString()}) newest=${newest} (${new Date(newest*1e3).toISOString()}) hotEvents=${hotEvents.size} hotMarkets=${hotMarkets.size}`);
+
+    if(SEED_UNTIL_SINCE && oldest<=SINCE) break;
+    offset += (SEED_LIMIT - Math.min(50, Math.max(10, Math.floor(SEED_LIMIT/10))));
+    if(offset>=MAX_OFFSET){ console.error(`  seed offset>${MAX_OFFSET} stop`); break; }
+  }
+  return { hotMarkets, hotEvents };
+}
+
+// ---------- /trades helpers ----------
+function mkTradesUrlBase(){
+  const u=new URL(`${BASE_DATA}/trades`);
+  u.searchParams.set("takerOnly", String(TAKER_ONLY));
+  u.searchParams.set("filterType","CASH");
+  u.searchParams.set("filterAmount", String(MIN_CASH));
+  return u;
+}
+
+// Run one market batch through pages
+async function runMarketBatch(ids, rowsSink){
+  // cheap probe
+  const probeBase=mkTradesUrlBase(); probeBase.searchParams.set("market", ids.join(","));
+  const probe = new URL(probeBase); probe.searchParams.set("limit", "50"); probe.searchParams.set("offset","0");
+  const { json: head, ok: probeOK } = await safeGetJson(probe.toString(), { timeout: PROBE_TIMEOUT_MS });
+
+  if(!probeOK || !Array.isArray(head)){
+    if(ids.length>1){
+      console.error(`    probe aborted/failed — will split batch (len=${ids.length})`);
+      return { split:true };
+    }else{
+      console.error(`    probe aborted/failed — single market; SKIP ${ids[0].slice(0,10)}…`);
+      return { skip:true };
+    }
+  }
+
+  if(head.length>0 && COLD_SKIP_HOURS>0){
+    const newest = head.reduce((mx,r)=>Math.max(mx,toSec(r.timestamp||r.ts)||-Infinity), -Infinity);
+    if(HOURS!=null && newest!==-Infinity && newest < (SINCE - COLD_SKIP_HOURS*3600)){
+      console.error(`    (skip cold batch newest<<SINCE-${COLD_SKIP_HOURS}h)`);
+      return { cold:true };
+    }
+  }else if(head.length===0){
+    console.error(`      page 1 off=0 got=0 (done)`);
+    if(COLD_SKIP_HOURS>0) return { cold:true };
+  }
+
+  // page loop
+  const base=probeBase;
+  let offset=0, page=0, cutoffHit=false, marginLeft=2;
 
   for(;;){
     page++;
-    const url = new URL(`${BASE_DATA}/trades`);
-    url.searchParams.set("limit", String(LIMIT));
+    const url=new URL(base);
+    url.searchParams.set("limit", String(LIMIT_PAGE));
     url.searchParams.set("offset", String(offset));
-    url.searchParams.set("filterType", "CASH");
-    url.searchParams.set("filterAmount", "100");
-    // NOTE: no takerOnly — we want maker + taker like the UI
-
-    const { json: rows, ms } = await getJson(url.toString());
-    if (!Array.isArray(rows) || rows.length===0){ end(); break; }
-
-    if (sort==null && rows.length>=2){
-      const t0=toSec(rows[0].timestamp ?? rows[0].ts);
-      const tL=toSec(rows[rows.length-1].timestamp ?? rows[rows.length-1].ts);
-      sort = (t0 >= tL) ? 'DESC' : 'ASC';
-      console.error(`      detected sort: ${sort}`);
+    const t0=Date.now();
+    const { json: rows, ok } = await safeGetJson(url.toString());
+    if(!ok || !Array.isArray(rows)){
+      if(ids.length>1){
+        console.error(`  retry/split hint: aborted/failed ${Date.now()-t0}ms`);
+        return { split:true };
+      }else{
+        console.error(`  aborted/failed on single market — SKIP ${ids[0].slice(0,10)}…`);
+        return { skip:true };
+      }
     }
 
-    let oldest=Infinity, newest=-Infinity;
-    for (const r of rows){ const ts=toSec(r.timestamp ?? r.ts); if(ts){ if(ts<oldest) oldest=ts; if(ts>newest) newest=ts; } }
-    if (sort==='DESC' && baseDelta==null && HOURS!=null && oldest!==Infinity) baseDelta=Math.max(1, oldest - SINCE);
+    if(rows.length===0){
+      console.error(`      page ${page} off=${offset} got=0 (done)`);
+      break;
+    }
 
-    // === dual include logic ===
+    const kept = HOURS==null ? rows : rows.filter(r => toSec(r.timestamp ?? r.ts) >= SINCE);
+    rowsSink.push(...kept);
+    pageStatPush({ page, offset, rows, kept: kept.length });
+
+    // progress
+    if(HOURS!=null){
+      const oldest = rows.reduce((mn,r)=>Math.min(mn, toSec(r.timestamp||r.ts)||Infinity), Infinity);
+      const newest = rows.reduce((mx,r)=>Math.max(mx, toSec(r.timestamp||r.ts)||-Infinity), -Infinity);
+      const baseDelta = newest - SINCE;
+      let pct=0, extra="";
+      if(baseDelta>0 && oldest!==Infinity){
+        const remain = Math.max(0, oldest - SINCE);
+        pct = Math.max(0, Math.min(1, 1 - (remain/baseDelta)));
+        extra = ` ${(pct*100).toFixed(1)}%`;
+      }
+      console.error(`      page ${page} off=${offset} got=${fmt(rows.length)} kept=${fmt(kept.length)} ms=${Date.now()-t0} ${bar(pct)}${extra}`);
+
+      if(!cutoffHit && oldest < SINCE){ cutoffHit=true; }
+      else if(cutoffHit){
+        if(--marginLeft <= 0){ console.error(`      ↳ cutoff reached + margin scanned (2)`); break; }
+      }
+    }else{
+      console.error(`      page ${page} off=${offset} got=${fmt(rows.length)} kept=${fmt(kept.length)} ms=${Date.now()-t0}`);
+    }
+
+    if(rows.length < LIMIT_PAGE) break;
+    offset += (LIMIT_PAGE - OVERLAP);
+    if(offset>=MAX_OFFSET){ console.error(`      offset>${MAX_OFFSET} stop`); break; }
+  }
+
+  return { done:true };
+}
+
+// concurrent queue
+function makeBatches(cids){
+  const out=[];
+  for(let i=0;i<cids.length;i+=MARKET_BATCH){
+    out.push(cids.slice(i, i+MARKET_BATCH));
+  }
+  return out;
+}
+function createQueue(initialLists){
+  const tasks = initialLists.map(ids => ({ ids }));
+  return {
+    tasks,
+    take(){ return this.tasks.shift() || null; },
+    add(idsList){ for(const ids of idsList) this.tasks.push({ ids }); },
+    size(){ return this.tasks.length; }
+  };
+}
+
+// paranoia
+async function paranoiaHeadScan(targetCids){
+  if(PARANOIA_PAGES<=0 || targetCids.length===0) return [];
+  console.error(`[3/4] Paranoia: head re-scan (${PARANOIA_PAGES} pages @ offset=0, mode=market)`);
+  const all=[];
+  for(let i=0;i<targetCids.length;i+=MARKET_BATCH){
+    const b=targetCids.slice(i,i+MARKET_BATCH);
+    const base=mkTradesUrlBase(); base.searchParams.set("market", b.join(","));
+    let offset=0;
+    for(let p=1;p<=PARANOIA_PAGES;p++){
+      const url=new URL(base); url.searchParams.set("limit", String(LIMIT_PAGE)); url.searchParams.set("offset", String(offset));
+      const { json: rows, ok } = await safeGetJson(url.toString());
+      if(!ok || !Array.isArray(rows) || rows.length===0) break;
+      const kept = HOURS==null ? rows : rows.filter(r => toSec(r.timestamp ?? r.ts) >= SINCE);
+      console.error(`    head page ${p} off=${offset} got=${fmt(rows.length)} kept=${fmt(kept.length)}`);
+      all.push(...kept);
+      if(rows.length < LIMIT_PAGE) break;
+      offset += (LIMIT_PAGE - OVERLAP);
+    }
+  }
+  return all;
+}
+
+// ---------- GLOBAL WINDOW backstop ----------
+async function fetchGlobalWindowAndFilter(universe){
+  console.error(`[BF:global] Backstop global window scan (DESC) with sports filter (limit=${LIMIT_PAGE})`);
+  const keep = [];
+  let offset=0, page=0, cutoffHit=false, marginLeft=2;
+  const inSlug = (s)=> s && universe.slugs.has(s);
+  const inCid  = (c)=> c && universe.cids.has(String(c).toLowerCase());
+  const inEid  = (e)=> e!=null && universe.eids.has(e);
+
+  for(;;){
+    page++;
+    const url=new URL(`${BASE_DATA}/trades`);
+    url.searchParams.set("limit", String(LIMIT_PAGE));
+    url.searchParams.set("offset", String(offset));
+    url.searchParams.set("takerOnly", String(TAKER_ONLY));
+    url.searchParams.set("filterType","CASH");
+    url.searchParams.set("filterAmount", String(MIN_CASH));
+    const t0=Date.now();
+    const { json: rows, ok } = await safeGetJson(url.toString());
+    if(!ok || !Array.isArray(rows) || rows.length===0){
+      console.error(`  global page ${page} off=${offset} got=0 (done)`); break;
+    }
+
+    // DESC window math
+    const oldest = rows.reduce((mn,r)=>Math.min(mn, toSec(r.timestamp||r.ts)||Infinity), Infinity);
+    const newest = rows.reduce((mx,r)=>Math.max(mx, toSec(r.timestamp||r.ts)||-Infinity), -Infinity);
+    let pct=0, extra="";
+    if(HOURS!=null){
+      const baseDelta = newest - SINCE;
+      if(baseDelta>0 && oldest!==Infinity){
+        const remain = Math.max(0, oldest - SINCE);
+        pct = Math.max(0, Math.min(1, 1 - (remain/baseDelta)));
+        extra = ` ${(pct*100).toFixed(1)}%`;
+      }
+    }
+
+    // time + sports filter
     const filtered = rows.filter(r=>{
       const ts = toSec(r.timestamp ?? r.ts);
       if (HOURS!=null && ts < SINCE) return false;
       const slug = r.eventSlug || r.slug;
       const cid  = r.market || r.asset || r.conditionId;
-      return inSlug(slug) || inCid(cid);
+      const eid  = r.eventId ?? r.event_id ?? null;
+      return inSlug(slug) || inCid(cid) || inEid(eid);
     });
+
+    pageStatPush({ page, offset, rows, kept: filtered.length });
+    console.error(`  global page ${page} off=${offset} got=${fmt(rows.length)} kept=${fmt(filtered.length)} ms=${Date.now()-t0} ${bar(pct)}${extra}`);
+
     keep.push(...filtered);
 
-    let pct=0, extra="";
-    if (sort==='DESC' && HOURS!=null && baseDelta!=null && oldest!==Infinity){
-      const remain = Math.max(0, oldest - SINCE);
-      pct = Math.max(0, Math.min(1, 1 - (remain/baseDelta)));
-      extra = ` ${(pct*100).toFixed(1)}%`;
-    }
-    print(`      page ${page} off=${offset} got=${fmt(rows.length)} kept=${fmt(filtered.length)} cum=${fmt(keep.length)} ms=${ms} ${bar(pct)}${extra}`);
-
     if (HOURS!=null){
-      if (sort==='DESC' && oldest!==Infinity && oldest < SINCE){ end(); console.error(`      ↳ cutoff reached (oldest < since)`); break; }
-      if (sort==='ASC'  && filtered.length===0 && newest!==-Infinity && newest < SINCE){ end(); console.error(`      ↳ no rows in window and page newest < since — stop`); break; }
+      if(!cutoffHit && oldest < SINCE){ cutoffHit = true; }
+      else if(cutoffHit){
+        if(--marginLeft <= 0){ console.error(`  ↳ global cutoff reached + margin scanned (2)`); break; }
+      }
     }
 
-    ema = ema===0 ? ms : Math.round(alpha*ms + (1-alpha)*ema);
-    offset += LIMIT;
-    if (offset > 5_000_000){ end(); console.error(`      ↳ safety stop: huge scan`); break; }
+    if(rows.length < LIMIT_PAGE) break;
+    offset += (LIMIT_PAGE - Math.min(OVERLAP, LIMIT_PAGE-1));
+    if(offset>=MAX_OFFSET){ console.error(`  global offset>${MAX_OFFSET} stop`); break; }
+    if(REQUESTS>=MAX_REQUESTS){ console.error(`  global maxRequests reached; stop`); break; }
   }
-  return dedupe(keep);
+  return keep;
 }
 
-// ---------- quick summary ----------
-function summarize(rows){
-  const bySlug=new Map(); let minTs=Infinity, maxTs=-Infinity;
-  for(const r of rows){ const ts=toSec(r.timestamp ?? r.ts); const slug=r.eventSlug || r.slug || "unknown";
-    bySlug.set(slug, (bySlug.get(slug)??0)+1); if(ts&&ts<minTs) minTs=ts; if(ts&&ts>maxTs) maxTs=ts; }
-  const top=[...bySlug.entries()].sort((a,b)=>b[1]-a[1]).slice(0,10);
-  console.error(`summary: trades=${rows.length} uniqueEvents=${bySlug.size} window=[${new Date(minTs*1000).toISOString()} .. ${new Date(maxTs*1000).toISOString()}]`);
-  console.error(`top events:`); for(const [slug,n] of top) console.error(`  ${String(n).padStart(4)}  ${slug}`);
+// ---------- Summary ----------
+function summarize(finalRows, dedMeta){
+  console.error(`[4/4] Summary`);
+  printPageSample();
+  console.error(`dedupe.unique=${dedMeta.unique} drops=${dedMeta.drops} sampleKeys=${JSON.stringify(dedMeta.samples)}`);
+  const keptBySlug=new Map();
+  for(const r of finalRows){
+    const slug=r.eventSlug||r.slug||"unknown";
+    keptBySlug.set(slug, (keptBySlug.get(slug)||0)+1);
+  }
+  const top=[...keptBySlug.entries()].sort((a,b)=>b[1]-a[1]).slice(0,10);
+  console.error("top.kept", top);
 }
 
-// ---------- MAIN ----------
+// ---------- Main ----------
 (async function main(){
+  const tStart=Date.now();
   try{
-    console.error(`Node: ${process.version}`);
-    const universe = await buildSportsUniverse(TAG, INCLUDE_INACTIVE);
-    console.error(`      sports slugs=${fmt(universe.slugs.size)} conditionIds=${fmt(universe.cids.size)}`);
+    console.error(`Args: fast=${FAST} hours=${HOURS==null?'ALL':HOURS} takerOnly=${TAKER_ONLY} minCash=${MIN_CASH} limitPage=${LIMIT_PAGE} overlap=${OVERLAP} batch=${MARKET_BATCH} conc=${CONCURRENCY} seedLimit=${SEED_LIMIT} seedMaxPages=${SEED_MAX_PAGES} untilSince=${SEED_UNTIL_SINCE} paranoiaPages=${PARANOIA_PAGES} maxOffset=${MAX_OFFSET} maxTargets=${MAX_TARGETS} coldSkipHours=${COLD_SKIP_HOURS} globalWindowScan=${GLOBAL_WINDOW}`);
 
-    const rows = await fetchGlobalTradesFiltered(universe);
+    // Build SPORTS universe first (needed for global filter)
+    const tagId = await getSportsTagId(TAG_SLUG);
+    const universe = await buildSportsUniverse(tagId);
+    console.error(`      sports slugs=${fmt(universe.slugs.size)} conditionIds=${fmt(universe.cids.size)} eventIds=${fmt(universe.eids.size)}`);
 
-    summarize(rows);
-    await savePretty(OUTFILE, rows);
-    process.stdout.write(JSON.stringify(rows));
-    console.error(`[4/4] Done. Saved ${OUTFILE}`);
+    // HOT markets + seed
+    console.error(`[1/4] Gamma: derive HOT sports markets (volume24hr/updatedAt)`);
+    const recent = await getRecentSportsMarkets(tagId, MAX_TARGETS);
+    let hotCids = recent.map(r=>r.cid);
+    const seed = await seedHotFromGlobal();
+    if(seed.hotMarkets.size){
+      const set = new Set(hotCids);
+      for(const cid of seed.hotMarkets) set.add(cid);
+      hotCids = [...set].slice(0, MAX_TARGETS);
+    }
+    console.error(`      focus: markets=${fmt(hotCids.length)} (ranked), from Gamma+seed`);
+
+    // Market-batch pass
+    console.error(`[2/4] Data-API: /trades batched by market (DESC, limit=${LIMIT_PAGE}, overlap=${OVERLAP}, batch=${MARKET_BATCH}, conc=${CONCURRENCY})`);
+    const rowsA=[];
+    const queue = createQueue(makeBatches(hotCids));
+    let processed=0;
+
+    async function worker(){
+      while(true){
+        const task = queue.take();
+        if(!task) break;
+        const { ids } = task;
+        processed++;
+        console.error(`  task #${processed} (markets=${ids.length}) | queue=${queue.size()}`);
+        const res = await runMarketBatch(ids, rowsA);
+        if(res?.split && ids.length>1){
+          const mid=Math.floor(ids.length/2);
+          const left=ids.slice(0,mid), right=ids.slice(mid);
+          console.error(`      split -> [${left.length}], [${right.length}]`);
+          queue.add([left, right]);
+        }
+      }
+    }
+    await Promise.all(Array.from({length:CONCURRENCY}, ()=>worker()));
+
+    // Paranoia head scan
+    const rowsB = await paranoiaHeadScan(hotCids.slice(0, Math.min(60, hotCids.length)));
+
+    // Optional GLOBAL WINDOW backstop (no-miss)
+    let rowsC = [];
+    if(GLOBAL_WINDOW){
+      rowsC = await fetchGlobalWindowAndFilter(universe);
+    }
+
+    // Merge + dedupe
+    const merged = rowsA.concat(rowsB, rowsC);
+    const ded = dedupe(merged);
+    const finalRows = ded.out;
+
+    // Summary + write
+    summarize(finalRows, ded);
+    const meta = {
+      args, SINCE, since_iso:new Date(SINCE*1e3).toISOString(),
+      elapsed_ms: Date.now()-tStart, requests: REQUESTS, ema_ms: EMA,
+      counts: { market_pass: rowsA.length, paranoia: rowsB.length, global_backstop: rowsC.length, final: finalRows.length, drops: ded.drops }
+    };
+    await savePretty(META_OUT, meta);
+    console.error(`[Meta] Saved ${META_OUT}`);
+
+    await savePretty(OUTFILE, finalRows);
+    process.stdout.write(JSON.stringify(finalRows));
+    console.error(`[][Done] Saved ${OUTFILE}`);
   }catch(e){
-    console.error("FATAL:", e?.message || e);
+    console.error("FATAL (unexpected):", e?.message || e);
     process.exit(1);
   }
 })();
