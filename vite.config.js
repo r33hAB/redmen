@@ -1,32 +1,28 @@
+// vite.config.ts
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
-    open: true,
-    hmr: { overlay: true },
     proxy: {
-      '/api/gamma': {
-        target: 'https://gamma-api.polymarket.com',
+      '/feed': {
+        target: 'http://127.0.0.1:7777',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/gamma/, ''),
-        secure: true,
+        ws: false,
+        secure: false,
+        onError(err, req, res) {
+          console.error('[vite-proxy] error', err?.code, req.url)
+          res.writeHead(502, { 'Content-Type': 'text/plain' })
+          res.end('Proxy error.')
+        },
       },
-      '/api/data': {
-        target: 'https://data-api.polymarket.com',
+      '/health': {
+        target: 'http://127.0.0.1:7777',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/data/, ''),
-        secure: true,
-      },
-      '/api/clob': {
-        target: 'https://clob.polymarket.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/clob/, ''),
-        secure: true,
+        ws: false,
+        secure: false,
       },
     },
   },
-  build: { sourcemap: true }
 })

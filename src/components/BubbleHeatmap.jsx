@@ -1,230 +1,193 @@
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { forceSimulation, forceCollide, forceManyBody } from "d3-force";
 
 /**
- * Free‑floating heat bubbles (same size).
- * Fill = activityScore heat (green→red). Tooltip shows % split and unique buyers/sellers.
+ * BubbleHeatmap — preserves positions across refreshes, adds slight size boost for hotter bubbles,
+ * and runs a gentle force sim (repulsion + drift + soft walls). Labels limited to top movers.
  */
-export default function BubbleHeatmap({ markets = [], onSelect, selectedSlug }) {
-  const wrapRef = useRef(null);
-  const [size, setSize] = useState({ w: 1024, h: 640 });
+const gamma = (x, g=0.65) => Math.pow(Math.max(0, Math.min(1, x)), g);
+const heatColor = (t) => `hsl(${130 - 130 * t}, 92%, ${50 + 10*(1-t)}%)`;
+const TOP_LABELS = 18;
+const BASE_R = 24;           // base radius
+const BOOST = 8;             // extra radius for hottest bubbles (scaled by heat)
 
+export default function BubbleHeatmap({ markets = [], onSelect, selectedId }) {
+  const wrapRef  = useRef(null);
+  const nodesRef = useRef(new Map()); // id -> node {id,title,totalUSD,act,heat,r,x,y,vx,vy}
+  const orderRef = useRef([]);        // stable iteration order
+  const [size, setSize] = useState({ w: 1200, h: 560 });
+  const [, force] = useState(0);
+
+  // Observe container size
   useEffect(() => {
-    if (!wrapRef.current) return;
-    const ro = new ResizeObserver((entries) => {
-      const r = entries[0]?.contentRect;
-      setSize({
-        w: Math.max(520, Math.floor(r?.width || 1024)),
-        h: Math.max(560, Math.floor(r?.height || 640)),
-      });
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setSize({ w: r.width, h: Math.max(440, r.height) });
     });
-    ro.observe(wrapRef.current);
+    ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
-  const fixedR = useMemo(() => {
-    const N = Math.max(1, markets.length);
-    const area = size.w * size.h;
-    const coverage = 0.30;
-    const r = Math.sqrt((coverage * area) / (N * Math.PI));
-    return Math.max(26, Math.min(86, r));
-  }, [markets.length, size]);
-
-  const nodes = useMemo(() => {
-    if (!markets.length) return [];
-    const maxA = Math.max(1, ...markets.map((m) => +m.activityScore || 0));
-    const cx = size.w / 2, cy = size.h / 2;
-    return markets.map((m, i) => ({
-      ...m,
-      id: m.slug ?? i,
-      r: fixedR,
-      heat: Math.max(0, Math.min(1, (+m.activityScore || 0) / maxA)),
-      x: cx + (Math.random() - 0.5) * (size.w * 0.6),
-      y: cy + (Math.random() - 0.5) * (size.h * 0.6),
-      vx: (Math.random() - 0.5) * 0.7,
-      vy: (Math.random() - 0.5) * 0.7,
-      _phase: Math.random() * Math.PI * 2,
-    }));
-  }, [markets, size, fixedR]);
-
-  const [simNodes, setSimNodes] = useState([]);
-  const simRef = useRef(null);
-  const liveNodesRef = useRef([]);
-
-  const heatColor      = (t) => `hsl(${130 - 130 * t}, 90%, 55%)`;
-  const heatColorOuter = (t) => `hsl(${130 - 130 * t}, 70%, 25%)`;
-  const formatUSD = (n = 0) =>
-    Number(n).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-
-  function bounce(n) {
-    const R = n.r + 2;
-    const left = R, right = size.w - R, top = R, bottom = size.h - R;
-    if (n.x < left)        { n.x = left;   n.vx = Math.abs(n.vx) * 0.95; }
-    else if (n.x > right)  { n.x = right;  n.vx = -Math.abs(n.vx) * 0.95; }
-    if (n.y < top)         { n.y = top;    n.vy = Math.abs(n.vy) * 0.95; }
-    else if (n.y > bottom) { n.y = bottom; n.vy = -Math.abs(n.vy) * 0.95; }
-  }
-
+  // Incrementally update nodes from markets WITHOUT resetting positions
   useEffect(() => {
-    if (!nodes.length) { setSimNodes([]); return; }
+    const map = nodesRef.current;
+    // normalize markets -> stats
+    const stats = markets.map((m) => ({
+      id: m.conditionId || m.slug || m.title,
+      title: m.title || m.slug || "Untitled",
+      totalUSD: Number(m.totalUSD ?? m.totals?.totalUSD ?? 0),
+      act: Number(m.activityScore ?? 0),
+    }));
 
-    const simN = nodes.map((n) => ({ ...n }));
-    const sim = forceSimulation(simN)
-      .velocityDecay(0.06)
-      .force("charge", forceManyBody().strength(-8))
-      .force("collide", forceCollide().radius(d => d.r + 2).strength(0.9).iterations(2))
-      .alpha(1)
-      .alphaDecay(0.006)
-      .alphaTarget(0.028);
+    const maxAct = Math.max(1, ...stats.map(s => s.act));
+    const seen = new Set();
 
-    simRef.current = sim;
-    liveNodesRef.current = simN;
+    // upsert existing nodes, tweak size/heat smoothly
+    for (const s of stats) {
+      seen.add(s.id);
+      const heat = gamma(maxAct > 0 ? s.act / maxAct : 0);
+      const targetR = BASE_R + BOOST * heat;
 
-    let windPhase = Math.random() * Math.PI * 2;
-    const windSpeed = 0.015;
-
-    let raf = null;
-    sim.on("tick", () => {
-      const t = performance.now() / 1000;
-      windPhase += 0.0012;
-      const wx = windSpeed * Math.cos(windPhase);
-      const wy = windSpeed * Math.sin(windPhase);
-
-      for (const n of simN) {
-        n.vx += 0.018 * Math.sin(n._phase + t * 0.75);
-        n.vy += 0.018 * Math.cos(n._phase + t * 0.75);
-
-        // soft containment near walls (no center gravity)
-        const margin = n.r * 1.6;
-        const k = 0.0009;
-        if (n.x < margin)                 n.vx += (margin - n.x) * k;
-        if (n.x > size.w - margin)        n.vx -= (n.x - (size.w - margin)) * k;
-        if (n.y < margin)                 n.vy += (margin - n.y) * k;
-        if (n.y > size.h - margin)        n.vy -= (n.y - (size.h - margin)) * k;
-
-        const maxV = 1.4;
-        const s = Math.hypot(n.vx, n.vy);
-        if (s > maxV) { n.vx = (n.vx / s) * maxV; n.vy = (n.vy / s) * maxV; }
-
-        bounce(n);
+      if (!map.has(s.id)) {
+        // seed new node near a deterministic grid slot
+        const i = orderRef.current.length;
+        const seedX = (i % 14) * 86 + 60 + (Math.random()*8-4);
+        const seedY = Math.floor(i / 14) * 86 + 60 + (Math.random()*8-4);
+        map.set(s.id, {
+          id: s.id, title: s.title, totalUSD: s.totalUSD, act: s.act,
+          heat, r: targetR, x: seedX, y: seedY, vx: (Math.random()*2-1)*0.3, vy: (Math.random()*2-1)*0.3
+        });
+        orderRef.current.push(s.id);
+      } else {
+        const n = map.get(s.id);
+        n.title = s.title;
+        n.totalUSD = s.totalUSD;
+        n.act = s.act;
+        n.heat = heat;
+        // ease radius toward new target (prevents jumps)
+        n.r += (targetR - n.r) * 0.2;
       }
+    }
 
-      if (!raf) {
-        raf = requestAnimationFrame(() => { setSimNodes([...simN]); raf = null; });
+    // remove nodes that disappeared
+    for (const id of Array.from(map.keys())) {
+      if (!seen.has(id)) {
+        map.delete(id);
+        orderRef.current = orderRef.current.filter(x => x !== id);
       }
-    });
+    }
+  }, [markets]);
 
-    return () => { sim.stop(); if (raf) cancelAnimationFrame(raf); simRef.current = null; };
-  }, [nodes, size]);
+  // top labels by total
+  const topIds = useMemo(() => {
+    const arr = Array.from(nodesRef.current.values());
+    return arr
+      .slice()
+      .sort((a,b)=> b.totalUSD - a.totalUSD)
+      .slice(0, TOP_LABELS)
+      .map(n => n.id);
+  }, [markets]); // recompute when new data arrives
 
-  // drag with capture‑only move + click/drag threshold
-  const dragState = useRef({ startX: 0, startY: 0, dragging: false, activeId: null });
+  const showLabel = (n) => {
+    if (!n) return false;
+    if (selectedId && n.id === selectedId) return true;
+    return topIds.includes(n.id);
+  };
 
-  function svgPointFromClient(target, e) {
-    const svg = target.ownerSVGElement;
-    const pt = svg.createSVGPoint();
-    pt.x = e.clientX; pt.y = e.clientY;
-    const p = pt.matrixTransform(svg.getScreenCTM().inverse());
-    return { x: p.x, y: p.y };
-  }
+  // Force simulation: gentle repulsion + drift + soft walls
+  useEffect(() => {
+    let raf;
+    const step = () => {
+      const W = size.w, H = size.h;
+      const arr = orderRef.current.map(id => nodesRef.current.get(id)).filter(Boolean);
 
-  function makeDragHandlers(node) {
-    return {
-      onPointerDown: (e) => {
-        e.preventDefault(); e.stopPropagation();
-        e.currentTarget.setPointerCapture(e.pointerId);
-        dragState.current = { startX: e.clientX, startY: e.clientY, dragging: false, activeId: e.pointerId };
-        node.vx = 0; node.vy = 0;
-      },
-      onPointerMove: (e) => {
-        if (!e.currentTarget.hasPointerCapture(e.pointerId) || dragState.current.activeId !== e.pointerId) return;
-        const dx = e.clientX - dragState.current.startX;
-        const dy = e.clientY - dragState.current.startY;
-        if (Math.hypot(dx, dy) > 5) dragState.current.dragging = true;
-        const { x, y } = svgPointFromClient(e.currentTarget, e);
-        node.x = x; node.y = y;
-        setSimNodes([...liveNodesRef.current]);
-      },
-      onPointerUp: (e) => {
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-          try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+      // pairwise minimal repulsion
+      for (let i=0;i<arr.length;i++) {
+        for (let j=i+1;j<arr.length;j++) {
+          const a = arr[i], b = arr[j];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const d = Math.max(0.001, Math.hypot(dx, dy));
+          const min = a.r + b.r + 8;
+          if (d < min) {
+            const k = (min - d) * 0.035;
+            const ux = dx / d, uy = dy / d;
+            a.vx -= ux * k; a.vy -= uy * k;
+            b.vx += ux * k; b.vy += uy * k;
+          }
         }
-        node.vx += (Math.random() - 0.5) * 0.5;
-        node.vy += (Math.random() - 0.5) * 0.5;
-        if (!dragState.current.dragging) onSelect && onSelect(node);
-        dragState.current = { startX: 0, startY: 0, dragging: false, activeId: null };
-        simRef.current && simRef.current.alphaTarget(0.035).restart();
-        setTimeout(() => simRef.current && simRef.current.alphaTarget(0.028), 120);
-      },
-      onPointerCancel: () => {
-        dragState.current = { startX: 0, startY: 0, dragging: false, activeId: null };
       }
+
+      // integrate with drift and soft-wall containment
+      for (const n of arr) {
+        // tiny random drift
+        n.vx += (Math.random()*2-1) * 0.02;
+        n.vy += (Math.random()*2-1) * 0.02;
+        // friction
+        n.vx *= 0.985; n.vy *= 0.985;
+        // integrate
+        n.x += n.vx; n.y += n.vy;
+        // walls
+        if (n.x < n.r+8) { n.x = n.r+8; n.vx *= -0.6; }
+        if (n.x > W - n.r - 8) { n.x = W - n.r - 8; n.vx *= -0.6; }
+        if (n.y < n.r+8) { n.y = n.r+8; n.vy *= -0.6; }
+        if (n.y > H - n.r - 8) { n.y = H - n.r - 8; n.vy *= -0.6; }
+      }
+
+      force(t => t+1);
+      raf = requestAnimationFrame(step);
     };
-  }
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [size.w, size.h]);
+
+  const handleClick = (id) => {
+    const n = nodesRef.current.get(id);
+    if (n && onSelect) onSelect({ conditionId: id, title: n.title });
+  };
+
+  const nodes = orderRef.current.map(id => nodesRef.current.get(id)).filter(Boolean);
 
   return (
-    <div ref={wrapRef} style={{ width: "100%", height: "70vh" }}>
-      <svg width={size.w} height={size.h} style={{ display: "block" }}>
-        <defs>
-          {simNodes.map((b) => (
-            <radialGradient id={`heat-${b.id}`} key={b.id} cx="50%" cy="50%" r="65%">
-              <stop offset="0%"  stopColor={heatColor(b.heat)} />
-              <stop offset="70%" stopColor={heatColor(b.heat)} stopOpacity="0.85" />
-              <stop offset="100%" stopColor={heatColorOuter(b.heat)} stopOpacity="1" />
-            </radialGradient>
-          ))}
-          <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-            <feDropShadow dx="0" dy="0" stdDeviation="6" floodColor="#000" floodOpacity="0.25" />
-          </filter>
-          <filter id="selGlow" x="-40%" y="-40%" width="180%" height="180%">
-            <feDropShadow dx="0" dy="0" stdDeviation="3" floodColor="#7aa2ff" floodOpacity="0.75" />
-          </filter>
-        </defs>
-
-        {simNodes.map((b) => {
-          const isSelected = b.slug === selectedSlug;
-          const title = (b.title || b.slug || "Market").toString();
-          const titleShort = title.length > 30 ? title.slice(0, 29) + "…" : title;
-
-          const buy = Math.max(0, +b.buys || 0);
-          const sell = Math.max(0, +b.sells || 0);
-          const tot = Math.max(1, buy + sell);
-          const buyPct = Math.round((buy / tot) * 100);
-          const sellPct = 100 - buyPct;
-
-          const drag = makeDragHandlers(b);
-
-          return (
-            <g key={b.id} transform={`translate(${b.x},${b.y})`} style={{ cursor: "grab" }} {...drag}>
-              <circle
-                r={b.r}
-                fill={`url(#heat-${b.id})`}
-                stroke={isSelected ? "#7aa2ff" : "#0e1835"}
-                strokeWidth={isSelected ? 2 : 1.25}
-                filter={isSelected ? "url(#selGlow)" : "url(#glow)"}
-              />
-              <ellipse
-                rx={b.r * 0.55}
-                ry={b.r * 0.38}
-                cx={-b.r * 0.25}
-                cy={-b.r * 0.3}
-                fill="rgba(255,255,255,0.10)"
-              />
-              <text
-                textAnchor="middle"
-                dy="0.35em"
-                style={{ fontSize: 12, fontWeight: 600, fill: "rgba(234,241,255,0.92)" }}
-              >
-                {titleShort}
-              </text>
-              <title>
-                {title} — heat {Math.round(b.heat * 100)}% • flow {formatUSD(b.totalUSD)}
-                {`\nBuy ${buyPct}% (${b.uniqueBuyers || 0} unique) / Sell ${sellPct}% (${b.uniqueSellers || 0} unique)`}
-              </title>
-            </g>
-          );
-        })}
-      </svg>
+    <div ref={wrapRef} style={{ width: "100%", minHeight: 480, position: "relative" }}>
+      {nodes.map(n => (
+        <div
+          key={n.id}
+          onClick={() => handleClick(n.id)}
+          title={n.title}
+          style={{
+            position:"absolute",
+            left: (n.x - n.r), top: (n.y - n.r),
+            width: n.r*2, height: n.r*2, borderRadius: "50%",
+            background: heatColor(n.heat),
+            filter: "drop-shadow(0 4px 10px rgba(0,0,0,.35))",
+            boxShadow: n.id===selectedId ? "0 0 0 3px #fff inset" : "inset 0 0 0 0 rgba(0,0,0,0)",
+            cursor: "pointer",
+            transition: "box-shadow 120ms ease"
+          }}
+        />
+      ))}
+      {nodes.filter(showLabel).map(n => (
+        <div
+          key={`label-${n.id}`}
+          style={{
+            position:"absolute",
+            transform:"translate(-50%, -50%)",
+            left: n.x,
+            top: n.y + n.r + 14,
+            fontSize: 12,
+            color:"#c6cfdb",
+            maxWidth: 220,
+            whiteSpace:"nowrap",
+            overflow:"hidden",
+            textOverflow:"ellipsis",
+            pointerEvents:"none"
+          }}
+        >
+          {n.title}
+        </div>
+      ))}
     </div>
   );
 }

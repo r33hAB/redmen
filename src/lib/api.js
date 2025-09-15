@@ -1,14 +1,8 @@
-// ---- Polymarket API client (dev-proxy friendly) ----
-// In dev, Vite proxies these to avoid CORS:
-//   /api/gamma -> https://gamma-api.polymarket.com
-//   /api/data  -> https://data-api.polymarket.com
-//   /api/clob  -> https://clob.polymarket.com
+// ---- Redmen FEED client (daemon-backed) ----
+// The app consumes local daemon endpoints via Vite proxy: /feed -> http://localhost:7777
 
-const GAMMA = "/api/gamma";
-const DATA  = "/api/data";
-const CLOB  = "/api/clob";
-
-export const endpoints = { GAMMA, DATA, CLOB };
+const FEED = "/feed";
+export const endpoints = { FEED };
 
 async function getJson(url, opts = {}) {
   const res = await fetch(url, { cache: "no-store", ...opts });
@@ -17,76 +11,60 @@ async function getJson(url, opts = {}) {
     const err = new Error(msg);
     err.status = res.status;
     err.url = url;
+    try { err.body = await res.text(); } catch {}
     throw err;
   }
   return res.json();
 }
 
-// Robust sports events fetch (used for debug/telemetry only)
-export async function fetchSportsEvents({ limit = 200 } = {}) {
-  const urls = [
-    `${GAMMA}/events?active=true&tag_slug=sports&limit=${limit}`,
-    `${GAMMA}/events?active=true&tag=sports&limit=${limit}`,
-    `${GAMMA}/events?active=true&limit=${limit}`,
-    `${GAMMA}/events?limit=${limit}`,
-  ];
-  let lastErr = null;
-  for (const url of urls) {
-    try {
-      const data = await getJson(url);
-      const filtered =
-        url.includes("tag=") || url.includes("tag_slug=")
-          ? data
-          : (Array.isArray(data)
-              ? data.filter(
-                  (e) =>
-                    (e.tags || [])
-                      .map(String)
-                      .some((t) => t.toLowerCase().includes("sport"))
-                )
-              : data);
-      return { url, data: filtered };
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error("Failed to fetch events");
+// Summary list for Bubble Board / Heatmap / List
+export async function fetchSportsEvents(params = {}) {
+  const { hours = 6, minUsd = 100, takerOnly = true, side, limit = 1000, offset = 0 } = params;
+  const q = new URLSearchParams({ hours, minUsd, takerOnly, limit, offset });
+  if (side) q.set("side", side);
+  const json = await getJson(`${FEED}/markets?${q.toString()}`);
+  const rows = Array.isArray(json?.markets) ? json.markets : Array.isArray(json) ? json : [];
+  // map to common shape
+  return rows.map(m => ({
+    conditionId: m.conditionId ?? m.slug ?? m.title ?? null,
+    slug: m.slug || "",
+    title: m.title || "",
+    totalUSD: m.totalUSD ?? m.totals?.totalUSD ?? 0,
+    buys: m.buys ?? m.totals?.buyUSD ?? 0,
+    sells: m.sells ?? m.totals?.sellUSD ?? 0,
+    uniqueBuyers: m.uniqueBuyers ?? m.totals?.uniqueBuyers ?? 0,
+    uniqueSellers: m.uniqueSellers ?? m.totals?.uniqueSellers ?? 0,
+    activityScore: m.activityScore ?? 0,
+    trades: m.trades ?? m.totals?.trades ?? 0,
+  }));
 }
 
-// Recent trades (site-wide)
-export async function fetchTrades({
-  minCash = 100,
-  limit = 500,
-  offset = 0,
-  takerOnly = true,
-} = {}) {
-  const url = `${DATA}/trades?limit=${limit}&offset=${offset}&takerOnly=${String(
-    takerOnly
-  )}&filterType=CASH&filterAmount=${minCash}`;
-  const data = await getJson(url);
-  return { url, data };
+// Trades-only (legacy compatibility)
+export async function fetchTrades(conditionId, params = {}) {
+  const { hours = 24 } = params;
+  const json = await getJson(`${FEED}/market/${encodeURIComponent(conditionId)}?hours=${hours}`);
+  return Array.isArray(json?.market?.trades) ? json.market.trades : [];
 }
 
-// Price history (simple)
-export async function fetchPriceHistory({ tokenId, interval = "1d" }) {
-  const url = `${CLOB}/prices-history?market=${encodeURIComponent(
-    tokenId
-  )}&interval=${interval}`;
-  const data = await getJson(url);
-  return { url, data };
+// Optional 24h price snapshot (legacy compatibility)
+export async function fetchPriceHistory(conditionId, params = {}) {
+  const { hours = 24 } = params;
+  const json = await getJson(`${FEED}/market/${encodeURIComponent(conditionId)}?hours=${hours}`);
+  return Array.isArray(json?.market?.price24h) ? json.market.price24h : [];
 }
 
-// Fetch ALL CLOB markets (paginate using next_cursor)
-export async function fetchAllClobMarkets() {
-  let next = "";
-  const all = [];
-  for (let i = 0; i < 20; i++) {
-    const url = `${CLOB}/markets${next ? `?next_cursor=${encodeURIComponent(next)}` : ""}`;
-    const json = await getJson(url);
-    const data = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
-    all.push(...data);
-    next = json?.next_cursor || "";
-    if (!next) break;
-  }
-  return all;
+// Full detail (topBettors, outcomes, totals, price24h)
+export async function fetchMarketDetail(conditionId, params = {}) {
+  const { hours = 24 } = params;
+  return getJson(`${FEED}/market/${encodeURIComponent(conditionId)}?hours=${hours}`);
+}
+
+// Compatibility shim for components still calling this
+export async function fetchAllClobMarkets(params = {}) {
+  const markets = await fetchSportsEvents(params);
+  return markets.map(m => ({
+    condition_id: m.conditionId,
+    slug: m.slug,
+    title: m.title
+  }));
 }

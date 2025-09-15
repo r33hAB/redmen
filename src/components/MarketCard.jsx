@@ -1,34 +1,37 @@
 import React from "react";
 
 function usd(n) {
-  return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  const v = Number(n || 0);
+  if (v >= 1_000_000) return `$${(v/1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `$${(v/1_000).toFixed(1)}k`;
+  return `$${v.toFixed(0)}`;
 }
 
-export default function MarketCard({ mkt, onClick }) {
-  const total = mkt.totalUSD || 0;
-  const buys = mkt.buys || 0;
-  const sells = mkt.sells || 0;
-  const sentiment = total > 0 ? (buys - sells) / total : 0;
+export default function MarketCard({ market, onClick }) {
+  const total = Number(market?.totalUSD ?? market?.totals?.totalUSD ?? 0);
+  const buys  = Number(market?.buyUSD ?? market?.buys ?? market?.totals?.buyUSD ?? 0);
+  const sells = Number(market?.sellUSD ?? market?.sells ?? market?.totals?.sellUSD ?? 0);
+  const ub    = Number(market?.uniqueBuyers ?? market?.totals?.uniqueBuyers ?? 0);
+  const us    = Number(market?.uniqueSellers ?? market?.totals?.uniqueSellers ?? 0);
+
+  const pct = (n,d) => d>0 ? Math.round((n/d)*100) : 0;
+  const pBuy = pct(buys, total);
+  const pSell = 100 - pBuy;
+
+  const ring = {
+    background: `conic-gradient(#22c55e 0 ${pBuy}%, #f43f5e ${pBuy}% 100%)`,
+    borderRadius: "50%",
+    width: 34, height: 34,
+    boxShadow: "inset 0 0 0 4px #0b1015, 0 1px 6px rgba(0,0,0,.35)",
+    flex:"0 0 auto"
+  };
 
   return (
-    <div className="item" onClick={onClick} role="button">
-      <div>
-        <div className="market-title">{mkt.title}</div>
-        <div className="chips" style={{marginTop: 6}}>
-          <span className="badge">Event: {mkt.eventSlug || "—"}</span>
-          <span className="badge">Trades: {mkt.tradeCount}</span>
-          <span className="badge">Outcomes: {Object.keys(mkt.outcomes || {}).length}</span>
-        </div>
-        <div className="kv" style={{marginTop: 8}}>
-          <div className="small">BUY</div><div className="right small">{usd(buys)}</div>
-          <div className="small">SELL</div><div className="right small">{usd(sells)}</div>
-          <div className="small">Net Sentiment</div>
-          <div className="right small" style={{color: sentiment >= 0 ? "var(--good)" : "var(--bad)"}}>{(sentiment*100).toFixed(1)}%</div>
-        </div>
-      </div>
-      <div className="right">
-        <div className="subtitle">Flow (≥$100)</div>
-        <div style={{fontWeight:700, fontSize:18}}>{usd(total)}</div>
+    <div className="card" onClick={onClick} style={{display:"flex", alignItems:"center", gap:12}}>
+      <div style={ring} title={`${pBuy}% / ${pSell}%`} />
+      <div style={{flex:1, minWidth:0}}>
+        <div className="title" style={{marginBottom:6}}>{market?.title || market?.slug || "Untitled market"}</div>
+        <div className="meta">{`${usd(total)} • ${pBuy}%/${pSell}% • ${ub}/${us}`}</div>
       </div>
     </div>
   );
