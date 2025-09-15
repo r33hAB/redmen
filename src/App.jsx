@@ -6,6 +6,8 @@ import MarketCard from "./components/MarketCard.jsx";
 import BubbleBoard from "./components/BubbleBoard.jsx";
 import BubbleHeatmap from "./components/BubbleHeatmap.jsx";
 import DetailsModal from "./components/DetailsModal.jsx";
+import MarketsList from "./components/MarketList.jsx";
+
 
 const VIEWS = ["Board", "Heatmap", "List"];
 
@@ -91,17 +93,13 @@ export default function App() {
       {error && <div style={{color:"crimson", marginBottom: 8}}>Error: {error}</div>}
       {busy && <div style={{opacity:0.7}}>Loading…</div>}
 
-      {view === "List" && (
-        <div className="cards">
-          {markets.map((m) => (
-            <MarketCard
-              key={m.conditionId || m.slug || m.title}
-              market={m}
-              onClick={() => setSelectedId(m.conditionId)}
-            />
-          ))}
-        </div>
-      )}
+      + {view === "List" && (
+   <MarketsList
+     markets={markets}
+     onSelect={(m) => setSelectedId(m.conditionId)}
+     selectedSlug={selectedId}
+   />
+ )}
 
       {view === "Board" && (
         <div className="section">
