@@ -93,7 +93,7 @@ export default function App() {
       {error && <div style={{color:"crimson", marginBottom: 8}}>Error: {error}</div>}
       {busy && <div style={{opacity:0.7}}>Loading…</div>}
 
-      + {view === "List" && (
+       {view === "List" && (
    <MarketsList
      markets={markets}
      onSelect={(m) => setSelectedId(m.conditionId)}
