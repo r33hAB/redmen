@@ -1,84 +1,61 @@
-// src/components/MarketsList.jsx
-import React, { useMemo } from "react";
-import { ringSplit, fmtPct } from "../lib/api.js"; // relative path (no '@' alias)
+import React from "react";
+import { splitFrom, usd, fmtPct, num } from "../lib/metrics";
 
-const toNum = (x) => (x == null ? 0 : +x || 0);
-function compactUSD(v) {
-  const n = Number(v || 0);
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}k`;
-  return `$${n.toFixed(0)}`;
-}
-
-export default function MarketsList({ markets = [], onSelect, selectedSlug }) {
-  const rows = useMemo(() => {
-    return markets
-      .map((m) => {
-        const id = m.conditionId || m.slug || m.title;
-        const { aPct, bPct } = ringSplit(m); // outcomes-first, fallback to flow
-        return {
-          id,
-          title: m.title || m.slug || "Untitled",
-          total: toNum(m.totalUSD ?? m.totals?.totalUSD),
-          aPct,
-          bPct,
-          ub: toNum(m.uniqueBuyers ?? m.totals?.uniqueBuyers),
-          us: toNum(m.uniqueSellers ?? m.totals?.uniqueSellers),
-          trades: toNum(m.trades ?? m.totals?.trades),
-        };
-      })
-      .sort((a, b) => b.total - a.total);
-  }, [markets]);
+export default function ListView({ markets = [], onRowClick }) {
+  // normalize & sort by numeric total flow
+  const rows = markets
+    .map((m) => {
+      const s = splitFrom(m);
+      return { m, ...s };
+    })
+    .sort((a, b) => b.total - a.total);
 
   return (
     <div style={{ width: "100%", overflowX: "auto" }}>
-      <table
-        style={{
-          width: "100%",
-          borderCollapse: "separate",
-          borderSpacing: 0,
-          color: "#c6cfdb",
-        }}
-      >
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
-          <tr style={{ background: "#0f1520" }}>
-            <th style={th}>#</th>
-            <th style={thLeft}>Market</th>
-            <th style={th}>Total</th>
-            <th style={th}>Split</th>
-            <th style={th}>Unique B/S</th>
-            <th style={th}>Trades</th>
+          <tr>
+            <th style={thL}>#</th>
+            <th style={thL}>Market</th>
+            <th style={thR}>Total</th>
+            <th style={thR}>Split</th>
+            <th style={thR}>Unique B/S</th>
+            <th style={thR}>Trades</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => {
-            const selected = selectedSlug && selectedSlug === r.id;
+            const m = r.m;
+            const title = m.title || m.question || m.name || m.slug || "—";
+
+            const uBuy = num(
+              m?.uniqueBuyers ?? m?.totals?.uniqueBuyers ?? m?.stats?.uniqueBuyers
+            );
+            const uSell = num(
+              m?.uniqueSellers ?? m?.totals?.uniqueSellers ?? m?.stats?.uniqueSellers
+            );
+            const trades = num(
+              m?.tradeCount ?? m?.totals?.tradeCount ?? m?.stats?.tradeCount
+            );
+
             return (
               <tr
-                key={r.id}
-                onClick={() => onSelect && onSelect({ conditionId: r.id })}
-                style={{
-                  background: selected ? "#11213a" : "#0b1015",
-                  cursor: "pointer",
-                }}
+                key={m.id || m.slug || i}
+                onClick={() => onRowClick && onRowClick(m)}
+                style={{ cursor: onRowClick ? "pointer" : "default" }}
               >
-                <td style={td}>{i + 1}</td>
-                <td
-                  style={{
-                    ...tdLeft,
-                    maxWidth: 560,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
-                  title={r.title}
-                >
-                  {r.title}
+                <td style={tdL}>{i + 1}</td>
+                <td style={{ ...tdL, maxWidth: 640, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {title}
                 </td>
-                <td style={td}>{compactUSD(r.total)}</td>
-                <td style={td}>{fmtPct(r.aPct)} / {fmtPct(r.bPct)}</td>
-                <td style={td}>{r.ub}/{r.us}</td>
-                <td style={td}>{r.trades}</td>
+                <td style={tdR}>{usd(r.total)}</td>
+                <td style={tdR}>
+                  {fmtPct(r.buyPct)} / {fmtPct(r.sellPct)}
+                </td>
+                <td style={tdR}>
+                  {uBuy}/{uSell}
+                </td>
+                <td style={tdR}>{trades}</td>
               </tr>
             );
           })}
@@ -88,19 +65,23 @@ export default function MarketsList({ markets = [], onSelect, selectedSlug }) {
   );
 }
 
-const th = {
-  padding: "10px 12px",
-  fontSize: 12,
+// minimal dark table styles inline to keep this drop-in
+const thBase = {
   fontWeight: 600,
-  textAlign: "center",
-  borderBottom: "1px solid #223042",
-};
-const thLeft = { ...th, textAlign: "left" };
-
-const td = {
+  fontSize: 12,
+  color: "#a8b3c5",
   padding: "10px 12px",
-  fontSize: 13,
-  textAlign: "center",
-  borderBottom: "1px solid #1a2635",
+  borderBottom: "1px solid rgba(255,255,255,0.06)",
+  textTransform: "uppercase",
+  letterSpacing: ".03em",
 };
-const tdLeft = { ...td, textAlign: "left" };
+const tdBase = {
+  padding: "10px 12px",
+  borderBottom: "1px solid rgba(255,255,255,0.06)",
+  color: "#e6edf5",
+  fontSize: 14,
+};
+const thL = { ...thBase, textAlign: "left" };
+const thR = { ...thBase, textAlign: "right" };
+const tdL = { ...tdBase, textAlign: "left" };
+const tdR = { ...tdBase, textAlign: "right" };

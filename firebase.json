@@ -1,35 +1,31 @@
 {
   "hosting": {
     "public": "dist",
-    "ignore": [
-      "**/.*",
-      "**/node_modules/**"
-    ],
+    "ignore": ["**/.*", "**/node_modules/**"],
     "headers": [
       {
         "source": "**/*.@(js|css)",
         "headers": [
-          {
-            "key": "Cache-Control",
-            "value": "public, max-age=31536000, immutable"
-          }
+          { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
         ]
       },
       {
         "source": "**/*.@(png|jpg|jpeg|gif|webp|svg|ico|woff|woff2|ttf|otf)",
         "headers": [
-          {
-            "key": "Cache-Control",
-            "value": "public, max-age=31536000, immutable"
-          }
+          { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
         ]
       }
     ],
     "rewrites": [
       {
-        "source": "**",
-        "destination": "/index.html"
-      }
+        "source": "/feed/**",
+        "run": { "serviceId": "REDACTED_SERVICE_ID", "region": "europe-west1" }
+      },
+      {
+        "source": "/health",
+        "run": { "serviceId": "REDACTED_SERVICE_ID", "region": "europe-west1" }
+      },
+      { "source": "**", "destination": "/index.html" }
     ]
   }
 }
