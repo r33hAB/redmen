@@ -1,4 +1,5 @@
-// Shared numeric + display helpers used by List & DetailsModal
+// src/lib/metrics.ts
+// Shared numeric + display helpers used by List, Cards & DetailsModal
 
 export function num(x: any): number {
   if (x == null) return 0;
@@ -7,36 +8,33 @@ export function num(x: any): number {
 }
 
 export function usd(n: number): string {
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}k`;
-  return `$${n.toFixed(0)}`;
+  const v = Number(n || 0);
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000)     return `$${(v / 1_000).toFixed(1)}k`;
+  return `$${v.toFixed(0)}`;
 }
 
 export function fmtPct(p: number): string {
-  return `${p.toFixed(1)}%`;
+  return `${(Number(p) || 0).toFixed(1)}%`;
 }
 
 /**
- * Compute buy/sell/total and percentages defensively.
- * Accepts a market or a { totals: {...} } payload.
+ * Normalizes a market-like object into buy/sell/total and percentages.
+ * Accepts either top-level totals (totalUSD, buyUSD, sellUSD) or nested totals.
  */
-export function splitFrom(m: any) {
-  const totals = m?.totals || m?.stats || m;
-
-  const buy = num(m?.buyUSD ?? totals?.buyUSD);
+export function splitFrom(m: any): { buy: number; sell: number; total: number; buyPct: number; sellPct: number } {
+  // prefer nested totals if present
+  const totals = m?.totals || m?.stats || {};
+  const buy  = num(m?.buyUSD  ?? totals?.buyUSD);
   const sell = num(m?.sellUSD ?? totals?.sellUSD);
 
-  // Prefer explicit totalUSD if present; else sum buy+sell
-  const total = num(m?.totalUSD ?? totals?.totalUSD);
-  const aggTotal = total > 0 ? total : (buy + sell);
+  // total can be explicitly provided; otherwise compute
+  const totalField = num(m?.totalUSD ?? totals?.totalUSD);
+  const total = totalField > 0 ? totalField : (buy + sell);
 
   const denom = buy + sell;
-  let buyPct = 0;
-  let sellPct = 0;
-  if (denom > 0) {
-    buyPct = (buy / denom) * 100;
-    sellPct = 100 - buyPct;
-  }
+  const buyPct  = denom > 0 ? (buy  / denom) * 100 : 50;
+  const sellPct = denom > 0 ? 100 - buyPct         : 50;
 
-  return { buy, sell, total: aggTotal, buyPct, sellPct };
+  return { buy, sell, total, buyPct, sellPct };
 }

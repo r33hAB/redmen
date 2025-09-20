@@ -1,13 +1,10 @@
+// src/components/MarketList.jsx
 import React from "react";
 import { splitFrom, usd, fmtPct, num } from "../lib/metrics";
 
 export default function ListView({ markets = [], onRowClick }) {
-  // normalize & sort by numeric total flow
   const rows = markets
-    .map((m) => {
-      const s = splitFrom(m);
-      return { m, ...s };
-    })
+    .map((m) => ({ m, ...splitFrom(m) }))
     .sort((a, b) => b.total - a.total);
 
   return (
@@ -24,37 +21,26 @@ export default function ListView({ markets = [], onRowClick }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => {
-            const m = r.m;
-            const title = m.title || m.question || m.name || m.slug || "—";
+          {rows.map(({ m, buy, sell, total }, i) => {
+            const denom = buy + sell;
+            const buyPct  = denom > 0 ? (buy / denom) * 100 : 50;
+            const sellPct = denom > 0 ? 100 - buyPct : 50;
 
-            const uBuy = num(
-              m?.uniqueBuyers ?? m?.totals?.uniqueBuyers ?? m?.stats?.uniqueBuyers
-            );
-            const uSell = num(
-              m?.uniqueSellers ?? m?.totals?.uniqueSellers ?? m?.stats?.uniqueSellers
-            );
-            const trades = num(
-              m?.tradeCount ?? m?.totals?.tradeCount ?? m?.stats?.tradeCount
-            );
+            const uBuy = num(m?.uniqueBuyers ?? m?.totals?.uniqueBuyers ?? m?.stats?.uniqueBuyers);
+            const uSell = num(m?.uniqueSellers ?? m?.totals?.uniqueSellers ?? m?.stats?.uniqueSellers);
+            const trades = num(m?.trades ?? m?.tradeCount ?? m?.totals?.trades ?? m?.stats?.trades);
 
             return (
               <tr
                 key={m.id || m.slug || i}
                 onClick={() => onRowClick && onRowClick(m)}
-                style={{ cursor: onRowClick ? "pointer" : "default" }}
+                style={{ cursor: "pointer" }}
               >
-                <td style={tdL}>{i + 1}</td>
-                <td style={{ ...tdL, maxWidth: 640, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {title}
-                </td>
-                <td style={tdR}>{usd(r.total)}</td>
-                <td style={tdR}>
-                  {fmtPct(r.buyPct)} / {fmtPct(r.sellPct)}
-                </td>
-                <td style={tdR}>
-                  {uBuy}/{uSell}
-                </td>
+                <td style={tdR}>{i + 1}</td>
+                <td style={tdL}>{m.title || m.question || m.name}</td>
+                <td style={tdR}>{usd(total)}</td>
+                <td style={tdR}>{fmtPct(buyPct)} / {fmtPct(sellPct)}</td>
+                <td style={tdR}>{uBuy}/{uSell}</td>
                 <td style={tdR}>{trades}</td>
               </tr>
             );
@@ -65,12 +51,11 @@ export default function ListView({ markets = [], onRowClick }) {
   );
 }
 
-// minimal dark table styles inline to keep this drop-in
 const thBase = {
-  fontWeight: 600,
-  fontSize: 12,
-  color: "#a8b3c5",
   padding: "10px 12px",
+  color: "#9fb0c7",
+  fontSize: 12,
+  fontWeight: 600,
   borderBottom: "1px solid rgba(255,255,255,0.06)",
   textTransform: "uppercase",
   letterSpacing: ".03em",

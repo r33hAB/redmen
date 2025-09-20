@@ -17,14 +17,6 @@
       }
     ],
     "rewrites": [
-      {
-        "source": "/feed/**",
-        "run": { "serviceId": "REDACTED_SERVICE_ID", "region": "europe-west1" }
-      },
-      {
-        "source": "/health",
-        "run": { "serviceId": "REDACTED_SERVICE_ID", "region": "europe-west1" }
-      },
       { "source": "**", "destination": "/index.html" }
     ]
   }

@@ -4,7 +4,7 @@ export default {
   server: {
     proxy: {
       '/feed': {
-        target: 'CLOUD_RUN_URL_PLACEHOLDER',
+        target: ' CLOUD_RUN_URL_PLACEHOLDER/',
         changeOrigin: true,
         secure: true,
       },

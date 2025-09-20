@@ -1,13 +1,58 @@
 // src/lib/api.js
+
+/* ------------ small utils ------------ */
+const shortAddr = (w) =>
+  (w && w.length > 12) ? `${w.slice(0,6)}…${w.slice(-4)}` : (w || '');
+
 function normalizeFeedBase(raw) {
-  const b = (raw || "/feed").replace(/\/+$/, "");
+  let b = (raw || "/feed").trim().replace(/\/+$/, "");
   if (!b || b === "/") return "/feed";
   if (/^https?:\/\//i.test(b)) return b.endsWith("/feed") ? b : b + "/feed";
-  return b;
+  return b; // relative like "/feed"
 }
-export const FEED = normalizeFeedBase(import.meta?.env?.VITE_FEED_BASE);
+
+/** Robust prod fallback: if env missing on Firebase Hosting, use your Cloud Run URL */
+function resolveFeedBase() {
+  const envBase = (import.meta?.env && import.meta.env.VITE_FEED_BASE) || "";
+  const qpBase = new URLSearchParams(location.search).get("feed") || "";
+  const metaBase =
+    document.querySelector('meta[name="feed-base"]')?.getAttribute("content") ||
+    "";
+
+  const onFirebase =
+    /\.web\.app$/.test(location.hostname) ||
+    /\.firebaseapp\.com$/.test(location.hostname);
+
+  // Absolute daemon (your live url)
+  const ABSOLUTE_DAEMON =
+    "CLOUD_RUN_URL_PLACEHOLDER";
+
+  // Priority: query param > env > meta > fallback
+  let base = qpBase || envBase || metaBase || (onFirebase ? ABSOLUTE_DAEMON : "/feed");
+
+  const FEED = normalizeFeedBase(base);
+
+  try {
+    console.info("[Redmen] FEED base:", FEED, {
+      from: qpBase
+        ? "query"
+        : envBase
+        ? "env"
+        : metaBase
+        ? "meta"
+        : onFirebase
+        ? "firebase-fallback"
+        : "dev-default",
+    });
+  } catch {}
+
+  return FEED;
+}
+
+export const FEED = resolveFeedBase();
 export const endpoints = { FEED };
 
+/* ------------ HTTP helper ------------ */
 async function getJson(url, opts = {}) {
   const res = await fetch(url, { cache: "no-store", ...opts });
   if (!res.ok) {
@@ -17,65 +62,74 @@ async function getJson(url, opts = {}) {
     try { err.body = await res.text(); } catch {}
     throw err;
   }
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("text/html")) {
+    const txt = await res.text();
+    throw new Error(`Expected JSON, got HTML from ${url}. First bytes: ${txt.slice(0, 80)}`);
+  }
   return res.json();
 }
-const num = (x) => (x == null ? 0 : +x || 0);
 
-export async function fetchHealth() { return getJson(`${FEED}/health`); }
-
-export async function fetchSportsEvents(params = {}) {
-  const { hours = 6, minUsd = 100, takerOnly = true, side, limit = 1000, offset = 0 } = params;
-  const q = new URLSearchParams({
-    hours: String(hours), minUsd: String(minUsd), takerOnly: String(takerOnly),
-    limit: String(limit), offset: String(offset),
+/* ------------ API calls ------------ */
+export async function fetchMarkets(params = {}) {
+  const qs = new URLSearchParams({
+    hours: String(params.hours ?? 24),
+    minUsd: String(params.minUsd ?? 100),
+    takerOnly: String(params.takerOnly ?? true),
+    limit: String(params.limit ?? 1000),
+    offset: String(params.offset ?? 0),
   });
-  if (side) q.set("side", side);
-  const json = await getJson(`${FEED}/markets?${q.toString()}`);
-  const rows = Array.isArray(json?.markets) ? json.markets : Array.isArray(json) ? json : [];
-  return rows.map((m) => ({
-    conditionId: m.conditionId ?? m.slug ?? m.title ?? null,
-    slug: m.slug || "", title: m.title || "",
-    totalUSD: num(m.totalUSD ?? m.totals?.totalUSD),
-    buys: num(m.buys ?? m.totals?.buyUSD),
-    sells: num(m.sells ?? m.totals?.sellUSD),
-    uniqueBuyers: num(m.uniqueBuyers ?? m.totals?.uniqueBuyers),
-    uniqueSellers: num(m.uniqueSellers ?? m.totals?.uniqueSellers),
-    activityScore: num(m.activityScore),
-    trades: num(m.trades ?? m.totals?.trades),
-    outcomes: Array.isArray(m.outcomes || m.outcomeTotals)
-      ? (m.outcomes || m.outcomeTotals).map((o) => ({
-          label: o.label ?? o.name ?? "",
-          usd:   num(o.usd ?? o.totalUSD ?? o.flowUSD),
-          trades:num(o.trades),
-        }))
-      : undefined,
-  }));
+  return getJson(`${FEED}/markets?${qs.toString()}`);
 }
 
-export async function fetchMarketDetail(conditionId, params = {}) {
-  const { hours = 24 } = params;
-  return getJson(`${FEED}/market/${encodeURIComponent(conditionId)}?hours=${hours}`);
+export async function fetchMarket(id, params = {}) {
+  const qs = new URLSearchParams({
+    hours: String(params.hours ?? 24),
+    takerOnly: String(params.takerOnly ?? true),
+  });
+  const data = await getJson(`${FEED}/market/${encodeURIComponent(id)}?${qs.toString()}`);
+
+  // ---- Name-first mapping for UI: ensure every trade + bettor has a friendly label
+  if (data && data.market) {
+    if (Array.isArray(data.market.trades)) {
+      data.market.trades = data.market.trades.map(t => ({
+        ...t,
+        display: t.display || "",                 // from daemon
+        wallet: t.wallet || "",
+        label: (t.display && t.display.trim())   // prefer name/pseudonym
+          ? t.display.trim()
+          : shortAddr(t.wallet),                  // fallback to short wallet
+      }));
+    }
+    if (Array.isArray(data.market.topBettors)) {
+      data.market.topBettors = data.market.topBettors.map(b => ({
+        ...b,
+        display: b.display || "",
+        wallet: b.wallet || "",
+        label: (b.display && b.display.trim())
+          ? b.display.trim()
+          : shortAddr(b.wallet),
+      }));
+    }
+  }
+  return data;
 }
-export async function fetchTrades(conditionId, params = {}) {
-  const { hours = 24 } = params;
-  const json = await getJson(`${FEED}/market/${encodeURIComponent(conditionId)}?hours=${hours}`);
-  return Array.isArray(json?.market?.trades) ? json.market.trades : [];
+
+/* ------------ Helpers (kept) ------------ */
+export function num(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : 0;
 }
-export async function fetchPriceHistory(conditionId, params = {}) {
-  const { hours = 24 } = params;
-  const json = await getJson(`${FEED}/market/${encodeURIComponent(conditionId)}?hours=${hours}`);
-  return Array.isArray(json?.market?.price24h) ? json.market.price24h : [];
-}
-export async function fetchAllClobMarkets(params = {}) {
-  const markets = await fetchSportsEvents(params);
-  return markets.map((m) => ({ condition_id: m.conditionId, slug: m.slug, title: m.title }));
-}
-export function ringSplit(market) {
-  const outs = Array.isArray(market?.outcomes) ? market.outcomes.filter(o => (o.usd || 0) > 0) : [];
-  if (outs.length >= 2) {
-    const top = [...outs].sort((a, b) => (b.usd || 0) - (a.usd || 0)).slice(0, 2);
-    const a = num(top[0].usd), b = num(top[1].usd), tot = a + b;
-    if (tot > 0) return { aPct: (a / tot) * 100, bPct: (b / tot) * 100, mode: "outcomes" };
+
+export function computeSplit(market) {
+  if (!market) return { aPct: 50, bPct: 50, mode: "empty" };
+  if (market.outcomes && typeof market.outcomes === "object") {
+    const vals = Object.values(market.outcomes);
+    if (vals.length >= 2) {
+      const top = vals.sort((a, b) => (b.usd || 0) - (a.usd || 0)).slice(0, 2);
+      const a = num(top[0].usd), b = num(top[1].usd), tot = a + b;
+      if (tot > 0) return { aPct: (a / tot) * 100, bPct: (b / tot) * 100, mode: "outcomes" };
+    }
   }
   const buy = num(market?.buys ?? market?.totals?.buyUSD);
   const sell = num(market?.sells ?? market?.totals?.sellUSD);
@@ -83,8 +137,17 @@ export function ringSplit(market) {
   if (tot > 0) return { aPct: (buy / tot) * 100, bPct: (sell / tot) * 100, mode: "flow" };
   return { aPct: 50, bPct: 50, mode: "empty" };
 }
+
 export function fmtPct(p) {
   if (p > 0 && p < 0.1) return "<0.1%";
   if (p > 99.9 && p < 100) return ">99.9%";
   return `${p.toFixed(1)}%`;
+}
+
+/* -------- Compatibility aliases (keep old imports working) -------- */
+export async function fetchMarketDetail(id, params = {}) {
+  return fetchMarket(id, params);
+}
+export async function fetchSportsEvents(params = {}) {
+  return fetchMarkets(params);
 }
