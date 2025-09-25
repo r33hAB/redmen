@@ -20,6 +20,11 @@ export default function App() {
   const [error, setError] = useState(null);
   const [view, setView] = useState(VIEWS[0]);
 
+  // Search and team highlight/filter state
+  const [query, setQuery] = useState("");
+  const [team, setTeam] = useState("");
+  const [onlyTeam, setOnlyTeam] = useState(true);
+
   function log(obj) { setLogs((L) => [...L.slice(-500), obj]); }
 
   async function load() {
@@ -53,6 +58,18 @@ export default function App() {
   }
 
   useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, []);
+
+  // Derived/filtered markets for view based on search & team inputs
+  const marketsFiltered = useMemo(() => {
+    const q = (query || "").trim().toLowerCase();
+    const t = (team || "").trim().toLowerCase();
+    return markets.filter(m => {
+      const hay = `${m.title} ${m.slug}`.toLowerCase();
+      const qOk = q ? hay.includes(q) : true;
+      const teamOk = onlyTeam && t ? hay.includes(t) : true;
+      return qOk && teamOk;
+    });
+  }, [markets, query, team, onlyTeam]);
 
   const selectedMarket = useMemo(
     () => markets.find((m) => m.conditionId === selectedId) || null,
@@ -90,12 +107,38 @@ export default function App() {
         ))}
       </div>
 
+      {/* Controls */}
+      <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap", alignItems:"center" }}>
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search markets…"
+          style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#0f1520", color:"#e6edf5", minWidth:220 }}
+        />
+        <input
+          value={team}
+          onChange={e => setTeam(e.target.value)}
+          placeholder="Highlight team (e.g., Lakers)"
+          style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#0f1520", color:"#e6edf5", minWidth:220 }}
+        />
+        <label style={{ display:"inline-flex", alignItems:"center", gap:8, fontSize:12, color:"#9fb0c7" }}>
+          <input type="checkbox" checked={onlyTeam} onChange={e => setOnlyTeam(e.target.checked)} />
+          Only show this team
+        </label>
+        {(query || team) && (
+          <button onClick={() => { setQuery(""); setTeam(""); setOnlyTeam(true); }}
+            style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#132033", color:"#c6cfdb" }}>
+            Clear
+          </button>
+        )}
+      </div>
+
       {error && <div style={{color:"crimson", marginBottom: 8}}>Error: {error}</div>}
       {busy && <div style={{opacity:0.7}}>Loading…</div>}
 
        {view === "List" && (
-   <MarketsList
-     markets={markets}
+   <MarketsList highlightText={team} greyOthers={!team || !onlyTeam ? false : true}
+     markets={marketsFiltered}
      onSelect={(m) => setSelectedId(m.conditionId)}
      selectedSlug={selectedId}
    />
@@ -103,13 +146,13 @@ export default function App() {
 
       {view === "Board" && (
         <div className="section">
-          <BubbleBoard markets={markets} onSelect={(m) => setSelectedId(m.conditionId)} selectedSlug={selectedId} />
+          <BubbleBoard highlightText={team} greyOthers={!team || !onlyTeam ? false : true} markets={marketsFiltered} onSelect={(m) => setSelectedId(m.conditionId)} selectedSlug={selectedId} />
         </div>
       )}
 
       {view === "Heatmap" && (
         <div className="section">
-          <BubbleHeatmap markets={markets} onSelect={(m) => setSelectedId(m.conditionId)} selectedId={selectedId} />
+          <BubbleHeatmap highlightText={team} greyOthers={!team || !onlyTeam ? false : true} markets={marketsFiltered} onSelect={(m) => setSelectedId(m.conditionId)} selectedId={selectedId} />
         </div>
       )}
 

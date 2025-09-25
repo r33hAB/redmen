@@ -11,7 +11,7 @@ const TOP_LABELS = 18;
 const BASE_R = 24;           // base radius
 const BOOST = 8;             // extra radius for hottest bubbles (scaled by heat)
 
-export default function BubbleHeatmap({ markets = [], onSelect, selectedId }) {
+export default function BubbleHeatmap({ markets = [], onSelect, selectedId, highlightText="", greyOthers=false }) {
   const wrapRef  = useRef(null);
   const nodesRef = useRef(new Map()); // id -> node {id,title,totalUSD,act,heat,r,x,y,vx,vy}
   const orderRef = useRef([]);        // stable iteration order
@@ -149,6 +149,7 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedId }) {
 
   const nodes = orderRef.current.map(id => nodesRef.current.get(id)).filter(Boolean);
 
+  const ht = (highlightText||"").toLowerCase();
   return (
     <div ref={wrapRef} style={{ width: "100%", minHeight: 480, position: "relative" }}>
       {nodes.map(n => (
@@ -159,6 +160,7 @@ export default function BubbleHeatmap({ markets = [], onSelect, selectedId }) {
           style={{
             position:"absolute",
             left: (n.x - n.r), top: (n.y - n.r),
+            opacity: (ht && greyOthers && !String(n.title||"").toLowerCase().includes(ht)) ? 0.25 : 1,
             width: n.r*2, height: n.r*2, borderRadius: "50%",
             background: heatColor(n.heat),
             filter: "drop-shadow(0 4px 10px rgba(0,0,0,.35))",

@@ -61,7 +61,7 @@ function computeSplit(m, hydratedOutcomes) {
   return { pA: 50, pB: 50, mode: "empty" };
 }
 
-export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
+export default function BubbleBoard({ markets = [], onSelect, selectedSlug, highlightText="", greyOthers=false }) {
   const wrapRef = useRef(null);
   const [outcomesById, setOutcomesById] = useState({}); // { [id]: normalizedOutcomes[] }
 
@@ -161,13 +161,17 @@ export default function BubbleBoard({ markets = [], onSelect, selectedSlug }) {
           margin: "0 auto",
         };
         const isSelected = selectedSlug && selectedSlug === r.id;
+        const ht = (highlightText||"").toLowerCase();
+        const isMatch = ht ? (String(r.title||"").toLowerCase().includes(ht)) : true;
+        const muted = ht && greyOthers && !isMatch;
         return (
           <div
             key={r.id}
             onClick={() => onSelect && onSelect({ conditionId: r.id })}
             style={{
               background: "#0f1520",
-              border: isSelected ? "2px solid #3b82f6" : "1px solid #2b3c52",
+              opacity: muted ? 0.25 : 1,
+              border: isSelected ? "2px solid #3b82f6" : (isMatch ? "1px solid #2b3c52" : "1px dashed #2b3c52"),
               borderRadius: 16,
               padding: 12,
               cursor: "pointer",

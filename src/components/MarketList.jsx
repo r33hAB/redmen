@@ -2,7 +2,8 @@
 import React from "react";
 import { splitFrom, usd, fmtPct, num } from "../lib/metrics";
 
-export default function ListView({ markets = [], onRowClick }) {
+export default function ListView({ markets = [], onRowClick, highlightText = "", greyOthers = false }) {
+  const ht = (highlightText||"").toLowerCase();
   const rows = markets
     .map((m) => ({ m, ...splitFrom(m) }))
     .sort((a, b) => b.total - a.total);
