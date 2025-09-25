@@ -6,6 +6,8 @@ import MarketCard from "./components/MarketCard.jsx";
 import BubbleBoard from "./components/BubbleBoard.jsx";
 import BubbleHeatmap from "./components/BubbleHeatmap.jsx";
 import DetailsModal from "./components/DetailsModal.jsx";
+import HoursToggle from "./components/HoursToggle.jsx";
+import SmartTeamPicker from "./components/SmartTeamPicker.jsx";
 import MarketsList from "./components/MarketList.jsx";
 
 
@@ -19,6 +21,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [view, setView] = useState(VIEWS[0]);
+  const [hours, setHours] = useState(24);
 
   // Search and team highlight/filter state
   const [query, setQuery] = useState("");
@@ -30,7 +33,7 @@ export default function App() {
   async function load() {
     setBusy(true); setError(null);
     try {
-      const r = await fetchSportsEvents({ hours: 6, minUsd: 100, takerOnly: true });
+      const r = await fetchSportsEvents({ hours, minUsd: 100, takerOnly: true });
       const src = Array.isArray(r) ? r : Array.isArray(r?.markets) ? r.markets : Array.isArray(r?.data) ? r.data : [];
       const list = src.map((m) => {
         const t = m.totals || {};
@@ -57,7 +60,7 @@ export default function App() {
     }
   }
 
-  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, []);
+  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [hours]);
 
   // Derived/filtered markets for view based on search & team inputs
   const marketsFiltered = useMemo(() => {
@@ -109,29 +112,24 @@ export default function App() {
 
       {/* Controls */}
       <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap", alignItems:"center" }}>
-        <input
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder="Search markets…"
-          style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#0f1520", color:"#e6edf5", minWidth:220 }}
-        />
-        <input
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search markets…"
+            style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#0f1520", color:"#e6edf5", minWidth:220 }}
+          />
+          <HoursToggle value={hours} onChange={setHours} />
+        </div>
+
+        <SmartTeamPicker
+          markets={markets}
           value={team}
-          onChange={e => setTeam(e.target.value)}
-          placeholder="Highlight team (e.g., Lakers)"
-          style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#0f1520", color:"#e6edf5", minWidth:220 }}
+          onChange={setTeam}
+          onlySelected={onlyTeam}
+          onOnlyChange={setOnlyTeam}
         />
-        <label style={{ display:"inline-flex", alignItems:"center", gap:8, fontSize:12, color:"#9fb0c7" }}>
-          <input type="checkbox" checked={onlyTeam} onChange={e => setOnlyTeam(e.target.checked)} />
-          Only show this team
-        </label>
-        {(query || team) && (
-          <button onClick={() => { setQuery(""); setTeam(""); setOnlyTeam(true); }}
-            style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#132033", color:"#c6cfdb" }}>
-            Clear
-          </button>
-        )}
-      </div>
+    </div>
 
       {error && <div style={{color:"crimson", marginBottom: 8}}>Error: {error}</div>}
       {busy && <div style={{opacity:0.7}}>Loading…</div>}
