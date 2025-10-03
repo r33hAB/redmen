@@ -1,0 +1,10 @@
+// Minimal patch for MarketCard.jsx footer chips:
+// Ensure `trades` chip shows a real count and hide "unique" on Kalshi
+/*
+const isKalshi = String(market?.source || "").toLowerCase() === "kalshi";
+const ub = Number(market?.uniqueBuyers ?? market?.totals?.uniqueBuyers ?? 0);
+const us = Number(market?.uniqueSellers ?? market?.totals?.uniqueSellers ?? 0);
+const trades = Number(market?.trades ?? market?.totals?.trades ?? 0);
+{!isKalshi && (<span className="chip">unique {ub}/{us}</span>)}
+<span className="chip">trades {trades}</span>
+*/

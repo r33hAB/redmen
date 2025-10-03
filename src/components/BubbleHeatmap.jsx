@@ -1,195 +1,116 @@
-
-import React, { useEffect, useMemo, useRef, useState } from "react";
+// src/components/BubbleHeatmap.jsx
+import React, { useMemo } from "react";
+import SourcePill from "./SourcePill.jsx";
 
 /**
- * BubbleHeatmap — preserves positions across refreshes, adds slight size boost for hotter bubbles,
- * and runs a gentle force sim (repulsion + drift + soft walls). Labels limited to top movers.
+ * BubbleHeatmap
+ * Props:
+ *  - markets: array of { conditionId, title, totalUSD, buyUSD, sellUSD, source }
+ *  - onSelect: function(market) when a tile is clicked
  */
-const gamma = (x, g=0.65) => Math.pow(Math.max(0, Math.min(1, x)), g);
-const heatColor = (t) => `hsl(${130 - 130 * t}, 92%, ${50 + 10*(1-t)}%)`;
-const TOP_LABELS = 18;
-const BASE_R = 24;           // base radius
-const BOOST = 8;             // extra radius for hottest bubbles (scaled by heat)
-
-export default function BubbleHeatmap({ markets = [], onSelect, selectedId, highlightText="", greyOthers=false }) {
-  const wrapRef  = useRef(null);
-  const nodesRef = useRef(new Map()); // id -> node {id,title,totalUSD,act,heat,r,x,y,vx,vy}
-  const orderRef = useRef([]);        // stable iteration order
-  const [size, setSize] = useState({ w: 1200, h: 560 });
-  const [, force] = useState(0);
-
-  // Observe container size
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => {
-      const r = el.getBoundingClientRect();
-      setSize({ w: r.width, h: Math.max(440, r.height) });
+export default function BubbleHeatmap({ markets = [], onSelect = () => {} }) {
+  const prepared = useMemo(() => {
+    const arr = Array.isArray(markets) ? markets.slice() : [];
+    // intensity by log(total)
+    const vals = arr.map(m => Math.max(1, Number(m.totalUSD || 0)));
+    const min = Math.min(...vals, 1);
+    const max = Math.max(...vals, 1);
+    const scale = (v) => {
+      const x = Math.log10(Math.max(1, v));
+      const a = Math.log10(Math.max(1, min));
+      const b = Math.log10(Math.max(1, max));
+      return (x - a) / ((b - a) || 1);
+    };
+    return arr.map(m => {
+      const buy = Number(m?.buyUSD || 0);
+      const sell = Number(m?.sellUSD || 0);
+      const total = buy + sell;
+      const pct = total > 0 ? (buy / total) : 0.5;
+      return { ...m, _int: scale(Number(m.totalUSD || 0)), _pct: pct };
     });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  // Incrementally update nodes from markets WITHOUT resetting positions
-  useEffect(() => {
-    const map = nodesRef.current;
-    // normalize markets -> stats
-    const stats = markets.map((m) => ({
-      id: m.conditionId || m.slug || m.title,
-      title: m.title || m.slug || "Untitled",
-      totalUSD: Number(m.totalUSD ?? m.totals?.totalUSD ?? 0),
-      act: Number(m.activityScore ?? 0),
-    }));
-
-    const maxAct = Math.max(1, ...stats.map(s => s.act));
-    const seen = new Set();
-
-    // upsert existing nodes, tweak size/heat smoothly
-    for (const s of stats) {
-      seen.add(s.id);
-      const heat = gamma(maxAct > 0 ? s.act / maxAct : 0);
-      const targetR = BASE_R + BOOST * heat;
-
-      if (!map.has(s.id)) {
-        // seed new node near a deterministic grid slot
-        const i = orderRef.current.length;
-        const seedX = (i % 14) * 86 + 60 + (Math.random()*8-4);
-        const seedY = Math.floor(i / 14) * 86 + 60 + (Math.random()*8-4);
-        map.set(s.id, {
-          id: s.id, title: s.title, totalUSD: s.totalUSD, act: s.act,
-          heat, r: targetR, x: seedX, y: seedY, vx: (Math.random()*2-1)*0.3, vy: (Math.random()*2-1)*0.3
-        });
-        orderRef.current.push(s.id);
-      } else {
-        const n = map.get(s.id);
-        n.title = s.title;
-        n.totalUSD = s.totalUSD;
-        n.act = s.act;
-        n.heat = heat;
-        // ease radius toward new target (prevents jumps)
-        n.r += (targetR - n.r) * 0.2;
-      }
-    }
-
-    // remove nodes that disappeared
-    for (const id of Array.from(map.keys())) {
-      if (!seen.has(id)) {
-        map.delete(id);
-        orderRef.current = orderRef.current.filter(x => x !== id);
-      }
-    }
   }, [markets]);
 
-  // top labels by total
-  const topIds = useMemo(() => {
-    const arr = Array.from(nodesRef.current.values());
-    return arr
-      .slice()
-      .sort((a,b)=> b.totalUSD - a.totalUSD)
-      .slice(0, TOP_LABELS)
-      .map(n => n.id);
-  }, [markets]); // recompute when new data arrives
-
-  const showLabel = (n) => {
-    if (!n) return false;
-    if (selectedId && n.id === selectedId) return true;
-    return topIds.includes(n.id);
-  };
-
-  // Force simulation: gentle repulsion + drift + soft walls
-  useEffect(() => {
-    let raf;
-    const step = () => {
-      const W = size.w, H = size.h;
-      const arr = orderRef.current.map(id => nodesRef.current.get(id)).filter(Boolean);
-
-      // pairwise minimal repulsion
-      for (let i=0;i<arr.length;i++) {
-        for (let j=i+1;j<arr.length;j++) {
-          const a = arr[i], b = arr[j];
-          const dx = b.x - a.x, dy = b.y - a.y;
-          const d = Math.max(0.001, Math.hypot(dx, dy));
-          const min = a.r + b.r + 8;
-          if (d < min) {
-            const k = (min - d) * 0.035;
-            const ux = dx / d, uy = dy / d;
-            a.vx -= ux * k; a.vy -= uy * k;
-            b.vx += ux * k; b.vy += uy * k;
-          }
-        }
-      }
-
-      // integrate with drift and soft-wall containment
-      for (const n of arr) {
-        // tiny random drift
-        n.vx += (Math.random()*2-1) * 0.02;
-        n.vy += (Math.random()*2-1) * 0.02;
-        // friction
-        n.vx *= 0.985; n.vy *= 0.985;
-        // integrate
-        n.x += n.vx; n.y += n.vy;
-        // walls
-        if (n.x < n.r+8) { n.x = n.r+8; n.vx *= -0.6; }
-        if (n.x > W - n.r - 8) { n.x = W - n.r - 8; n.vx *= -0.6; }
-        if (n.y < n.r+8) { n.y = n.r+8; n.vy *= -0.6; }
-        if (n.y > H - n.r - 8) { n.y = H - n.r - 8; n.vy *= -0.6; }
-      }
-
-      force(t => t+1);
-      raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [size.w, size.h]);
-
-  const handleClick = (id) => {
-    const n = nodesRef.current.get(id);
-    if (n && onSelect) onSelect({ conditionId: id, title: n.title });
-  };
-
-  const nodes = orderRef.current.map(id => nodesRef.current.get(id)).filter(Boolean);
-
-  const ht = (highlightText||"").toLowerCase();
   return (
-    <div ref={wrapRef} style={{ width: "100%", minHeight: 480, position: "relative" }}>
-      {nodes.map(n => (
-        <div
-          key={n.id}
-          onClick={() => handleClick(n.id)}
-          title={n.title}
-          style={{
-            position:"absolute",
-            left: (n.x - n.r), top: (n.y - n.r),
-            opacity: (ht && greyOthers && !String(n.title||"").toLowerCase().includes(ht)) ? 0.25 : 1,
-            width: n.r*2, height: n.r*2, borderRadius: "50%",
-            background: heatColor(n.heat),
-            filter: "drop-shadow(0 4px 10px rgba(0,0,0,.35))",
-            boxShadow: n.id===selectedId ? "0 0 0 3px #fff inset" : "inset 0 0 0 0 rgba(0,0,0,0)",
-            cursor: "pointer",
-            transition: "box-shadow 120ms ease"
-          }}
-        />
-      ))}
-      {nodes.filter(showLabel).map(n => (
-        <div
-          key={`label-${n.id}`}
-          style={{
-            position:"absolute",
-            transform:"translate(-50%, -50%)",
-            left: n.x,
-            top: n.y + n.r + 14,
-            fontSize: 12,
-            color:"#c6cfdb",
-            maxWidth: 220,
-            whiteSpace:"nowrap",
-            overflow:"hidden",
-            textOverflow:"ellipsis",
-            pointerEvents:"none"
-          }}
-        >
-          {n.title}
-        </div>
-      ))}
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+        gap: 12,
+      }}
+    >
+      {prepared.map((m) => {
+        const pct = Math.max(0, Math.min(1, m._pct || 0.5));
+        const deg = Math.round(pct * 360);
+        const R = 66;
+        // softer backgrounds, consistent
+        const g = Math.round(70 + m._int * 110);
+        const r = Math.round(170 - m._int * 120);
+        const bg = `rgba(${r}, ${g}, 90, 0.10)`;
+        const border = `1px solid rgba(${r}, ${g}, 110, 0.35)`;
+
+        return (
+          <div
+            key={m.conditionId || m.slug || m.title}
+            onClick={() => onSelect(m)}
+            style={{
+              position: "relative",
+              background: bg,
+              border, borderRadius: 12,
+              padding: 12, cursor: "pointer",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div
+                style={{
+                  color: "#e6edf5",
+                  fontWeight: 600,
+                  fontSize: 14,
+                  display: "-webkit-box",
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  lineHeight: "18px",
+                  maxHeight: 36
+                }}
+                title={m.title}
+              >
+                {m.title || m.slug || "Market"}
+              </div>
+              <SourcePill market={m} variant="compact" />
+            </div>
+
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div
+                style={{
+                  width: R, height: R, borderRadius: "50%",
+                  background: `conic-gradient(#22c55e ${deg}deg, #ef4444 ${deg}deg 360deg)`,
+                  display: "grid", placeItems: "center",
+                }}
+                title={`YES ${(pct * 100).toFixed(1)}%`}
+              >
+                <div
+                  style={{
+                    width: R-10, height: R-10,
+                    borderRadius: "50%",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "#c6cfdb", fontWeight: 700, fontSize: 13,
+                    display: "grid", placeItems: "center",
+                    border: "1px solid #223247",
+                  }}
+                >
+                  {(pct * 100).toFixed(0)}%
+                </div>
+              </div>
+
+              <div style={{ color: "#9fb0c7", fontSize: 12 }}>
+                <div>${Math.round(Number(m.totalUSD || 0)).toLocaleString()} total</div>
+                <div>buys/sells ${Math.round(Number(m.buyUSD || 0)).toLocaleString()}/{Math.round(Number(m.sellUSD || 0)).toLocaleString()}</div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

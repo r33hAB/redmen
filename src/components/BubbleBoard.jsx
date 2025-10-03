@@ -1,206 +1,85 @@
-// src/components/BubbleBoard.jsx — outcome-first split with lazy details hydrate
-import React, { useMemo, useRef, useEffect, useState } from "react";
-import { fetchMarketDetail } from "@/lib/api.js";
+// src/components/BubbleBoard.jsx
+import React, { useMemo } from "react";
+import SourcePill from "./SourcePill.jsx";
+import { kalshiGroupKey } from "../lib/badge.js";
 
-function compactUSD(v) {
-  try {
-    return Intl.NumberFormat("en-US", {
-      notation: "compact",
-      style: "currency",
-      currency: "USD",
-      maximumFractionDigits: 1,
-    }).format(Number(v || 0));
-  } catch {
-    const n = Number(v || 0);
-    if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}k`;
-    return `$${n.toFixed(0)}`;
-  }
-}
-const toNum = (x) => (x == null ? 0 : +x || 0);
-const pct1 = (p) => (p > 0 && p < 0.1 ? "<0.1%" : p > 99.9 && p < 100 ? ">99.9%" : `${p.toFixed(1)}%`);
+export default function BubbleBoard({ markets = [], onSelect = () => {} }) {
+  const prepared = useMemo(() => {
+    const arr = Array.isArray(markets) ? markets.slice() : [];
 
-// normalize outcomes from array/object shapes
-function normalizeOutcomes(src) {
-  if (!src) return [];
-  if (Array.isArray(src)) {
-    return src.map((o) => ({
-      label: o.label ?? o.name ?? "",
-      usd: toNum(o.usd ?? o.totalUSD ?? o.flowUSD),
-    }));
-  }
-  if (typeof src === "object") {
-    return Object.entries(src).map(([label, v]) => ({
-      label,
-      usd: toNum(v?.usd ?? v?.totalUSD ?? v?.flowUSD),
-    }));
-  }
-  return [];
-}
-
-// prefer outcomes; fallback to buy/sell
-function computeSplit(m, hydratedOutcomes) {
-  const outs = normalizeOutcomes(m?.outcomes?.length ? m.outcomes : hydratedOutcomes);
-  if (outs.length >= 2) {
-    outs.sort((a, b) => (b.usd || 0) - (a.usd || 0));
-    const a = toNum(outs[0].usd);
-    const b = toNum(outs[1].usd);
-    const tot = a + b;
-    if (tot > 0) {
-      const pA = (a / tot) * 100;
-      return { pA, pB: 100 - pA, mode: "outcomes" };
+    // Precompute group sums for Kalshi twin markets
+    const groups = new Map();
+    for (const m of arr) {
+      if (String(m?.source || "").toLowerCase() !== "kalshi") continue;
+      const key = kalshiGroupKey(m);
+      const total = Number(m?.totalUSD || (Number(m?.buyUSD||0) + Number(m?.sellUSD||0)) || 0);
+      const g = groups.get(key) || { sum: 0 };
+      g.sum += total;
+      groups.set(key, g);
     }
-  }
-  const buy = toNum(m?.buyUSD ?? m?.buys ?? m?.totals?.buyUSD);
-  const sell = toNum(m?.sellUSD ?? m?.sells ?? m?.totals?.sellUSD);
-  const tot = buy + sell;
-  if (tot > 0) {
-    const pA = (buy / tot) * 100;
-    return { pA, pB: 100 - pA, mode: "flow" };
-  }
-  return { pA: 50, pB: 50, mode: "empty" };
-}
 
-export default function BubbleBoard({ markets = [], onSelect, selectedSlug, highlightText="", greyOthers=false }) {
-  const wrapRef = useRef(null);
-  const [outcomesById, setOutcomesById] = useState({}); // { [id]: normalizedOutcomes[] }
+    // compute global min/max for diameter scaling
+    const allTotals = arr.map(mm => Number(mm?.totalUSD || (Number(mm?.buyUSD||0)+Number(mm?.sellUSD||0)) || 0));
+    const gmin = Math.min(...allTotals, 0);
+    const gmax = Math.max(...allTotals, 1);
 
-  // Size measure (if you use it elsewhere)
-  const [size, setSize] = useState({ w: 1200 });
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => {
-      setSize({ w: el.getBoundingClientRect().width });
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+    return arr.map((m) => {
+      const source = String(m?.source || "").toLowerCase();
+      const buy = Number(m?.buyUSD || 0);
+      const sell = Number(m?.sellUSD || 0);
+      const total = Number(m?.totalUSD || (buy + sell) || 0);
+      let pct;
 
-  // Determine which ids need hydration (no outcomes in list & not yet fetched)
-  const idsNeedingOutcomes = useMemo(() => {
-    const needed = [];
-    for (const m of markets) {
-      const id = m.conditionId || m.slug || m.title;
-      const hasListOutcomes = Array.isArray(m?.outcomes) && m.outcomes.length >= 2;
-      if (!hasListOutcomes && !outcomesById[id]) needed.push(id);
-      if (needed.length >= 30) break; // avoid hammering; fetch first 30
-    }
-    return needed;
-  }, [markets, outcomesById]);
-
-  // Lazy hydrate outcomes for the first page of visible markets
-  useEffect(() => {
-    if (!idsNeedingOutcomes.length) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        await Promise.all(
-          idsNeedingOutcomes.map(async (id) => {
-            const detail = await fetchMarketDetail(id, { hours: 6 });
-            const src =
-              detail?.market?.outcomes ||
-              detail?.market?.outcomeTotals ||
-              detail?.outcomes ||
-              detail?.outcomeTotals;
-            const norm = normalizeOutcomes(src);
-            if (!cancelled && norm.length >= 2) {
-              setOutcomesById((prev) => (prev[id] ? prev : { ...prev, [id]: norm }));
-            }
-          })
-        );
-      } catch {
-        // ignore individual failures; board will keep showing flow split
+      if (source === "kalshi") {
+        const key = kalshiGroupKey(m);
+        const g = groups.get(key);
+        const denom = Math.max(1, g?.sum || total || 1);
+        pct = total / denom; // share of flow vs the twin market(s)
+      } else {
+        const denom = Math.max(1, buy + sell);
+        pct = buy / denom;
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [idsNeedingOutcomes]);
 
-  const rows = useMemo(() => {
-    const out = [];
-    markets.forEach((m) => {
-      const id = m.conditionId || m.slug || m.title;
-      const total = toNum(m.totalUSD ?? m.totals?.totalUSD);
-      const ub = toNum(m.uniqueBuyers ?? m.totals?.uniqueBuyers);
-      const us = toNum(m.uniqueSellers ?? m.totals?.uniqueSellers);
-      const { pA, pB, mode } = computeSplit(m, outcomesById[id]);
+      const tRaw = (total - gmin) / ((gmax - gmin) || 1);
+      const s = Math.sqrt(Math.max(0, Math.min(1, tRaw)));
+      const d = Math.round(56 + s * (140 - 56));
 
-      out.push({
-        id,
-        title: m.title || m.slug || "Untitled",
-        total,
-        pA,
-        pB,
-        ub,
-        us,
-        mode,
-      });
+      return { ...m, _total: total, _pct: pct, _d: d, _trades: Number(m?.trades||0) };
     });
-    return out;
-  }, [markets, outcomesById]);
+  }, [markets]);
 
   return (
-    <div
-      ref={wrapRef}
-      style={{
-        width: "100%",
-        display: "grid",
-        gridTemplateColumns: `repeat(auto-fill, minmax(260px, 1fr))`,
-        gap: 14,
-      }}
-    >
-      {rows.map((r) => {
-        const ring = {
-          background: `conic-gradient(#22c55e 0 ${r.pA}%, #f43f5e ${r.pA}% 100%)`,
-          borderRadius: "50%",
-          width: 120,
-          height: 120,
-          boxShadow: "inset 0 0 0 10px #0b1015, 0 2px 10px rgba(0,0,0,.35)",
-          margin: "0 auto",
-        };
-        const isSelected = selectedSlug && selectedSlug === r.id;
-        const ht = (highlightText||"").toLowerCase();
-        const isMatch = ht ? (String(r.title||"").toLowerCase().includes(ht)) : true;
-        const muted = ht && greyOthers && !isMatch;
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap: 14 }}>
+      {prepared.map((m) => {
+        const pct = Math.max(0, Math.min(1, m._pct || 0.5));
+        const deg = Math.round(pct * 360);
+        const d = Math.max(40, Math.min(180, m._d || 56));
+        const ring = `conic-gradient(#22c55e ${deg}deg, #ef4444 ${deg}deg 360deg)`;
+        const title = m.title || m.slug || "Market";
+
         return (
           <div
-            key={r.id}
-            onClick={() => onSelect && onSelect({ conditionId: r.id })}
-            style={{
-              background: "#0f1520",
-              opacity: muted ? 0.25 : 1,
-              border: isSelected ? "2px solid #3b82f6" : (isMatch ? "1px solid #2b3c52" : "1px dashed #2b3c52"),
-              borderRadius: 16,
-              padding: 12,
-              cursor: "pointer",
-            }}
-            title={r.mode === "outcomes" ? "Outcome split" : "Buy/Sell split"}
+            key={m.conditionId || m.slug || title}
+            onClick={() => onSelect(m)}
+            style={{ position:"relative", background:"#0b1520", border:"1px solid #1e2a3a", borderRadius: 14, padding: 12, cursor: "pointer", display:"grid", gap: 10, justifyItems:"center" }}
+            title={`$${Math.round(m._total||0).toLocaleString()} total • trades ${Math.round(m._trades||0)}`}
           >
-            <div style={ring} />
-            <div
-              style={{
-                textAlign: "center",
-                color: "#c6cfdb",
-                marginTop: 8,
-                fontSize: 12,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {r.title}
+            <div style={{ position:"absolute", top:8, right:8 }}>
+              <SourcePill market={m} variant="compact" />
             </div>
-            <div
-              style={{
-                textAlign: "center",
-                color: "#9ba7b4",
-                marginTop: 6,
-                fontSize: 12,
-              }}
-            >
-              {compactUSD(r.total)} • {pct1(r.pA)} / {pct1(r.pB)} • {r.ub}/{r.us}
+
+            <div style={{ width: d, height: d, borderRadius:"50%", background: ring, display:"grid", placeItems:"center" }}>
+              <div style={{ width: d-14, height: d-14, borderRadius:"50%", background:"#0b1520", border:"1px solid #223247", display:"grid", placeItems:"center", color:"#c6cfdb", fontWeight:700, fontSize:14 }}>
+                {(pct * 100).toFixed(0)}%
+              </div>
+            </div>
+
+            <div style={{ color:"#e6edf5", fontWeight:600, fontSize:14, textAlign:"center", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden", textOverflow:"ellipsis", lineHeight:"18px", minHeight:36 }} title={title}>
+              {title}
+            </div>
+
+            <div style={{ color:"#9fb0c7", fontSize:12, textAlign:"center" }}>
+              ${Math.round(m._total || 0).toLocaleString()} total • trades {Math.round(m._trades || 0).toLocaleString()}
             </div>
           </div>
         );

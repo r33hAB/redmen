@@ -1,180 +1,187 @@
 // src/components/DetailsModal.jsx
-import React from "react";
-import { splitFrom, usd, num } from "../lib/metrics";
+import React, { useMemo } from "react";
+import Sparkline from "./Sparkline.jsx";
+import { yesNoLabels, sourceBadge } from "../lib/badge.js";
 
-// Shorten 0x… addresses nicely
-const shortAddr = (w) =>
-  w && w.length > 12 ? `${w.slice(0, 6)}…${w.slice(-4)}` : (w || "");
-
-// Prefer daemon-provided label/display, then other fields, else short wallet
-function bettorName(b = {}) {
-  const candidate =
-    b.label ??                 // added by api.js post-processing
-    b.display ??               // COALESCE(name,pseudonym) from daemon
-    b.pseudonym ??             // just in case
-    b.name ??
-    b.displayName ??
-    b.username ??
-    b.profile?.name ??
-    b.profile?.displayName ??
-    "";
-
-  const trimmed = String(candidate || "").trim();
-  if (trimmed) return trimmed;
-
-  // fallback: shortened address/wallet/id
-  return shortAddr(b.wallet || b.address || b.id || "");
+function inferSource(market, detail) {
+  const s = String(market?.source || detail?.source || "").toLowerCase();
+  if (s === "polymarket" || s === "kalshi") return s;
+  const id = String(market?.conditionId || market?.id || "");
+  const slug = String(market?.slug || "");
+  if (/^0x[a-f0-9]{64}$/i.test(id)) return "polymarket";
+  if (/^(kx|kxmlb)/i.test(slug) || slug.includes("kxmlb") || (id && id.includes("-"))) return "kalshi";
+  return "unknown";
 }
 
-export default function DetailsModal({ market, detail, onClose }) {
-  if (!market) return null;
+// Polymarket: (outcome=Yes & BUY) => Yes, (outcome=Yes & SELL) => No,
+//             (outcome=No & BUY)  => No,  (outcome=No & SELL)  => Yes.
+// USD = usd|totalUSD|amountUSD|sizeUSD fallback to size*price.
+// Kalshi: trades are on YES contract; SELL(YES) => No.
+function normalizeTradesBinary(trades = [], source = "unknown") {
+  const out = [];
+  for (const t of (trades || [])) {
+    const side = String(t?.side || "").toUpperCase();
+    const outc = String(t?.outcome || t?.outcomeLabel || t?.label || "").toLowerCase();
+    let label;
+    let usd = 0;
 
-  const totals = detail?.totals || market?.totals || market?.stats || {};
-  const { buy, sell, total } = splitFrom({ totals, ...market });
+    if (source === "polymarket") {
+      const isBuy = side === "BUY";
+      const isYes = (outc === "yes" && isBuy) || (outc === "no" && !isBuy);
+      label = isYes ? "Yes" : "No";
+      const size = Number(t?.size ?? 0) || 0;
+      const price = Number.isFinite(Number(t?.price)) ? Number(t?.price) : 1;
+      const givenUsd = Number(t?.usd ?? t?.totalUSD ?? t?.amountUSD ?? t?.sizeUSD ?? 0);
+      usd = givenUsd > 0 ? givenUsd : Math.max(0, size * price);
+    } else {
+      let isYes = true;
+      if (outc === "no") isYes = false;
+      if (side === "SELL") isYes = !isYes;
+      label = isYes ? "Yes" : "No";
+      usd = Number(t?.usd ?? t?.totalUSD ?? t?.amountUSD ?? t?.sizeUSD ?? t?.size ?? 0) || 0;
+      if (usd < 0) usd = Math.abs(usd);
+    }
 
-  const uniqB = num(market?.uniqueBuyers ?? totals.uniqueBuyers);
-  const uniqS = num(market?.uniqueSellers ?? totals.uniqueSellers);
-  const trades = num(
-    detail?.totals?.trades ??
-      market?.trades ??
-      market?.tradeCount ??
-      totals.trades
-  );
+    const ts = Number(t?.timestamp || t?.ts || 0) || 0;
+    out.push({ ts, usd, label });
+  }
+  return out;
+}
 
-  const title = market?.title || market?.question || market?.name || "Market";
+function sumByLabel(rows = []) {
+  const acc = { Yes: 0, No: 0 };
+  for (const r of rows) acc[r.label] = (acc[r.label] || 0) + (Number(r.usd) || 0);
+  return [{ label: "Yes", usd: acc.Yes }, { label: "No", usd: acc.No }];
+}
 
-  const outcomesAgg = detail?.outcomes || {};
-  const outcomeLabels = Array.isArray(market?.outcomes)
-    ? market.outcomes
-    : Object.keys(outcomesAgg);
+function bucketLastHourByLabel(rows = []) {
+  const now = Math.floor(Date.now() / 1000);
+  const start = now - 3600;
+  const bins = { Yes: new Array(12).fill(0), No: new Array(12).fill(0) };
+  for (const r of rows) {
+    const ts = Number(r?.ts || 0);
+    if (!ts || ts < start) continue;
+    const i = Math.min(11, Math.max(0, Math.floor((ts - start) / 300)));
+    bins[r.label === "No" ? "No" : "Yes"][i] += Number(r.usd) || 0;
+  }
+  return { series: [{ label: "Yes", bins: bins.Yes }, { label: "No", bins: bins.No }] };
+}
+
+export default function DetailsModal({
+  market, detail,
+  watchlistMarkets = new Set(), watchlistTeams = new Set(),
+  onToggleWatchMarket = () => {}, onToggleWatchTeam = () => {}, onClose
+}) {
+  const source = inferSource(market, detail);
+  const t = market?.totals || {};
+  const totalUSD = Number(market?.totalUSD ?? t.totalUSD ?? 0) || 0;
+  const buyUSD   = Number(market?.buyUSD   ?? t.buyUSD   ?? 0) || 0;
+  const sellUSD  = Number(market?.sellUSD  ?? t.sellUSD  ?? 0) || 0;
+  const trades   = Number(market?.trades ?? t.trades ?? (detail?.trades?.length || 0)) || 0;
+
+  const normalized = useMemo(() => {
+    const raw = detail?.market?.trades || detail?.trades || [];
+    return normalizeTradesBinary(raw, source);
+  }, [detail, source]);
+
+  const outcomesRaw = useMemo(() => sumByLabel(normalized), [normalized]);
+  const labels = yesNoLabels(market);
+  const outcomes = useMemo(() => outcomesRaw.map(o => ({
+    label: o.label === "Yes" ? labels.yes : labels.no,
+    usd: o.usd
+  })), [outcomesRaw, labels]);
+
+  const flowOutcome = useMemo(() => bucketLastHourByLabel(normalized), [normalized]);
+  const spark = useMemo(() => {
+    const series = detail?.prices || detail?.price1h || detail?.priceSeries || [];
+    return (Array.isArray(series) && series.length >= 2) ? series.map(Number) : [];
+  }, [detail]);
+
+  const id = market?.conditionId;
+  const isWatchedMarket = id && watchlistMarkets.has(id);
+  const badge = sourceBadge({ ...market, source });
 
   return (
-    <div style={overlay} onClick={onClose}>
-      <div style={modal} onClick={(e) => e.stopPropagation()}>
-        <div style={header}>
-          <h3 style={{ margin: 0, fontSize: 18 }}>{title}</h3>
-          <button onClick={onClose} style={xbtn}>
-            Close
-          </button>
+    <div style={{ position:"fixed", inset:0, zIndex:2000, display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <div onClick={onClose} style={{ position:"absolute", inset:0, background:"rgba(0,0,0,.5)" }} />
+      <div style={{ position:"relative", background:"#0f1823", color:"#e6edf5", border:"1px solid #2b3c52", borderRadius:12, width:"min(980px, 96vw)", maxHeight:"88vh", overflow:"auto", zIndex:2001 }}>
+        {/* Header */}
+        <div style={{ padding:16, borderBottom:"1px solid #223247", display:"flex", alignItems:"center", justifyContent:"space-between", position:"sticky", top:0, background:"#0f1823", zIndex:1 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+            <div style={{ fontWeight:700 }}>{market?.title || market?.slug || "Market"}</div>
+            <span style={{ background:"#1b2738", border:"1px solid #2b3c52", borderRadius:999, padding:"4px 10px", color:"#c6cfdb", fontSize:12 }}>{badge}</span>
+            <button onClick={() => onToggleWatchMarket(id)} style={{ background:isWatchedMarket ? "#244f2e" : "#1b2738", color:"#c6cfdb", border:"1px solid #2b3c52", borderRadius:999, padding:"4px 10px", cursor:"pointer", fontSize:12 }}>
+              {isWatchedMarket ? "★ Watch market" : "☆ Watch market"}
+            </button>
+          </div>
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            <a href={source === "polymarket" ? `https://polymarket.com/market/${market?.slug || market?.conditionId || ""}` : `https://kalshi.com/market/${market?.slug || market?.conditionId || ""}`}
+               target="_blank" rel="noreferrer" style={{ textDecoration:"none" }}>
+              <button style={{ background:"#1b2738", color:"#c6cfdb", border:"1px solid #2b3c52", borderRadius:8, padding:"6px 10px", cursor:"pointer" }}>
+                Open on {source === "polymarket" ? "Polymarket" : "Kalshi"}
+              </button>
+            </a>
+            <button onClick={onClose} style={{ background:"#172334", color:"#c6cfdb", border:"1px solid #2b3c52", borderRadius:8, padding:"6px 10px", cursor:"pointer" }}>Close</button>
+          </div>
         </div>
 
-        <div style={chips}>
-          <span style={chip}>{usd(total)}</span>
-          <span style={chip}>buys/sells {usd(buy)}/{usd(sell)}</span>
-          <span style={chip}>unique {uniqB}/{uniqS}</span>
-          <span style={chip}>trades {trades}</span>
+        {/* Sparkline */}
+        <div style={{ padding:16, borderBottom:"1px solid #223247" }}>
+          <div style={{ fontWeight:600, marginBottom:8 }}>Last hour price</div>
+          <Sparkline points={spark} width={720} height={72} />
         </div>
 
-        <div style={card}>
-          <div style={cardTitle}>Outcomes</div>
-          {outcomeLabels.map((label, idx) => {
-            const byLabel = outcomesAgg[label];
-            const byIdx = outcomesAgg[String(idx)];
-            const o = byLabel || byIdx || { usd: 0, trades: 0 };
-            return (
-              <div key={label} style={row}>
-                <div style={{ flex: 1 }}>{label}</div>
-                <div style={{ ...mono }}>
-                  {usd(o.usd)} • trades {o.trades}
-                </div>
+        {/* Chips */}
+        <div style={{ padding:16, display:"flex", gap:8, flexWrap:"wrap" }}>
+          <span style={{ background:"#172334", border:"1px solid #2b3c52", borderRadius:999, padding:"6px 10px"}}>${Math.round(totalUSD).toLocaleString()}</span>
+          <span style={{ background:"#172334", border:"1px solid #2b3c52", borderRadius:999, padding:"6px 10px"}}>buys/sells ${Math.round(buyUSD).toLocaleString()}/{Math.round(sellUSD).toLocaleString()}</span>
+          <span style={{ background:"#172334", border:"1px solid #2b3c52", borderRadius:999, padding:"6px 10px"}}>trades {trades}</span>
+        </div>
+
+        {/* Outcomes */}
+        <div style={{ padding:16, borderTop:"1px solid #223247" }}>
+          <div style={{ fontWeight:600, marginBottom:8 }}>Outcomes</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+            {outcomes.map((o) => (
+              <div key={o.label} style={{ display:"contents" }}>
+                <div style={{ background:"#0b1520", border:"1px solid #223247", borderRadius:8, padding:"8px 10px" }}>{o.label}</div>
+                <div style={{ textAlign:"right", background:"#0b1520", border:"1px solid #223247", borderRadius:8, padding:"8px 10px" }}>${Math.round(o.usd||0).toLocaleString()}</div>
               </div>
-            );
-          })}
-          {outcomeLabels.length === 0 && (
-            <div style={{ color: "#a8b3c5" }}>No outcome breakdown available.</div>
-          )}
+            ))}
+          </div>
         </div>
 
-        {Array.isArray(detail?.topBettors) && (
-          <div style={{ ...card, marginTop: 12 }}>
-            <div style={cardTitle}>Top bettors</div>
-            {detail.topBettors.map((b, i) => {
-              const name = bettorName(b);
-              const amount = usd(num(b.usd ?? b.totalUSD ?? b.flowUSD));
-              const tcount = num(b.trades);
-
+        {/* Flow by outcome bars */}
+        <div style={{ padding:16, borderTop:"1px solid #223247" }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+            <div style={{ fontWeight:600 }}>Flow by outcome (5‑min buckets)</div>
+            <div style={{ fontSize:12, color:"#9fb0c7" }}>
+              <span style={{ marginLeft: 12 }}><span style={{ display:"inline-block", width:10, height:10, background:"#22c55e", borderRadius:2, marginRight:6 }} />Yes</span>
+              <span style={{ marginLeft: 12 }}><span style={{ display:"inline-block", width:10, height:10, background:"#ef4444", borderRadius:2, marginRight:6 }} />No</span>
+            </div>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(12, 1fr)", gap:4 }}>
+            {Array.from({ length: 12 }).map((_, i) => {
+              const a = flowOutcome.series[0]?.bins[i] || 0;
+              const b = flowOutcome.series[1]?.bins[i] || 0;
+              const total = a + b || 1;
+              const ah = Math.round((a / total) * 100);
+              const bh = 100 - ah;
               return (
-                <div key={b.id || b.address || b.wallet || i} style={row}>
-                  <div style={{ flex: 1 }}>{name || "—"}</div>
-                  <div style={mono}>
-                    {amount} • trades {tcount}
-                  </div>
+                <div key={i} style={{ display:"grid", gridTemplateRows:`${ah}fr ${bh}fr`, height:60, background:"#0b1520", border:"1px solid #223247", borderRadius:4, overflow:"hidden" }}>
+                  <div title={`Yes $${Math.round(a).toLocaleString()}`} style={{ background:"#22c55e" }} />
+                  <div title={`No $${Math.round(b).toLocaleString()}`} style={{ background:"#ef4444" }} />
                 </div>
               );
             })}
           </div>
-        )}
+        </div>
+
+        {/* Traders note */}
+        <div style={{ padding:16, borderTop:"1px solid #223247", color:"#9fb0c7" }}>
+          Trader identities aren’t available on Kalshi due to privacy rules; top bettors list is shown only for Polymarket.
+        </div>
       </div>
     </div>
   );
 }
-
-const overlay = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,16,.6)",
-  backdropFilter: "blur(2px)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 60,
-};
-const modal = {
-  background: "#0b1322",
-  border: "1px solid rgba(255,255,255,.08)",
-  borderRadius: 12,
-  width: "min(880px, 90vw)",
-  maxHeight: "85vh",
-  overflow: "auto",
-  padding: 16,
-  boxShadow: "0 12px 40px rgba(0,0,0,.45)",
-};
-const header = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  marginBottom: 12,
-};
-const xbtn = {
-  background: "transparent",
-  color: "#a8b3c5",
-  border: "1px solid rgba(255,255,255,.12)",
-  borderRadius: 8,
-  padding: "6px 10px",
-  cursor: "pointer",
-};
-const chips = {
-  display: "flex",
-  gap: 8,
-  flexWrap: "wrap",
-  margin: "6px 0 14px",
-};
-const chip = {
-  background: "rgba(255,255,255,.06)",
-  border: "1px solid rgba(255,255,255,.08)",
-  padding: "6px 10px",
-  borderRadius: 999,
-  fontSize: 13,
-  color: "#c7d2e1",
-};
-const card = {
-  background: "rgba(255,255,255,.04)",
-  border: "1px solid rgba(255,255,255,.08)",
-  padding: 12,
-  borderRadius: 10,
-};
-const cardTitle = {
-  fontWeight: 600,
-  color: "#c7d2e1",
-  marginBottom: 8,
-};
-const row = {
-  display: "flex",
-  alignItems: "center",
-  padding: "6px 0",
-  borderBottom: "1px dashed rgba(255,255,255,.06)",
-};
-const mono = {
-  fontFamily:
-    "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-};

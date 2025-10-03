@@ -2,39 +2,106 @@ import React, { useEffect, useMemo, useState } from "react";
 import { fetchSportsEvents, fetchMarketDetail } from "./lib/api.js";
 
 import DebugPanel from "./components/DebugPanel.jsx";
-import MarketCard from "./components/MarketCard.jsx";
 import BubbleBoard from "./components/BubbleBoard.jsx";
 import BubbleHeatmap from "./components/BubbleHeatmap.jsx";
 import DetailsModal from "./components/DetailsModal.jsx";
-import HoursToggle from "./components/HoursToggle.jsx";
-import SmartTeamPicker from "./components/SmartTeamPicker.jsx";
-import MarketsList from "./components/MarketList.jsx";
-
+import SourceToggle from "./components/SourceToggle.jsx";
+import MarketList from "./components/MarketList.jsx";
+import Toaster from "./components/Toaster.jsx";
+import { minuteBins1h, zscore5v30 } from "./lib/bucket.js";
 
 const VIEWS = ["Board", "Heatmap", "List"];
+const FIXED_HOURS = 1;
+
+// heuristic: extract team-like tokens from a title
+function extractTeamsFromTitle(title = "") {
+  const t = String(title).replace(/\s+/g, " ").trim();
+  if (!t) return [];
+  const seps = [" vs ", " vs. ", " @ ", " at "];
+  let parts = [t];
+  for (const s of seps) {
+    if (t.toLowerCase().includes(s.trim())) {
+      parts = t.split(new RegExp(s, "i"));
+      break;
+    }
+  }
+  return parts.map(p => p.trim()).filter(Boolean);
+}
 
 export default function App() {
+  function inferSource(m) {
+    try {
+      const s = String(m?.source ?? "").toLowerCase();
+      if (s === "polymarket" || s === "kalshi") return s;
+      const id = String(m?.conditionId ?? m?.id ?? "");
+      const slug = String(m?.slug ?? "");
+      if (/^0x[a-f0-9]{64}$/i.test(id)) return "polymarket";
+      if (/^(kx|kxmlb)/i.test(slug) || slug.includes("kxmlb") || (id && id.includes("-"))) return "kalshi";
+    } catch {}
+    return "unknown";
+  }
+
   const [markets, setMarkets] = useState([]);
+  const [sources, setSources] = useState({ polymarket: true, kalshi: true });
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedMarket, setSelectedMarket] = useState(null);
   const [selectedDetail, setSelectedDetail] = useState(null);
-  const [logs, setLogs] = useState([]);
+
+  const [alerts, setAlerts] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [view, setView] = useState(VIEWS[0]);
-  const [hours, setHours] = useState(24);
 
-  // Search and team highlight/filter state
+  // Search + watchlists
   const [query, setQuery] = useState("");
-  const [team, setTeam] = useState("");
-  const [onlyTeam, setOnlyTeam] = useState(true);
+  const [onlyWatchlist, setOnlyWatchlist] = useState(false);
 
-  function log(obj) { setLogs((L) => [...L.slice(-500), obj]); }
+  const [watchlistMarkets, setWatchlistMarkets] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("bubldex_watch_markets") || "[]")); } catch { return new Set(); }
+  });
+  const [watchlistTeams, setWatchlistTeams] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("bubldex_watch_teams") || "[]")); } catch { return new Set(); }
+  });
+
+  useEffect(() => {
+    localStorage.setItem("bubldex_watch_markets", JSON.stringify(Array.from(watchlistMarkets)));
+  }, [watchlistMarkets]);
+  useEffect(() => {
+    localStorage.setItem("bubldex_watch_teams", JSON.stringify(Array.from(watchlistTeams)));
+  }, [watchlistTeams]);
+
+  function toggleWatchMarket(id) {
+    if (!id) return;
+    setWatchlistMarkets(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleWatchTeam(name) {
+    const key = String(name || "").toLowerCase().trim();
+    if (!key) return;
+    setWatchlistTeams(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
 
   async function load() {
     setBusy(true); setError(null);
     try {
-      const r = await fetchSportsEvents({ hours, minUsd: 100, takerOnly: true });
-      const src = Array.isArray(r) ? r : Array.isArray(r?.markets) ? r.markets : Array.isArray(r?.data) ? r.data : [];
+      const baseParams = { hours: FIXED_HOURS, minUsd: 100, takerOnly: true };
+      let params = { ...baseParams };
+      if (sources.polymarket && !sources.kalshi) params.source = "polymarket";
+      else if (!sources.polymarket && sources.kalshi) params.source = "kalshi";
+
+      const r = await fetchSportsEvents(params);
+      const src = Array.isArray(r) ? r
+        : Array.isArray(r?.markets) ? r.markets
+        : Array.isArray(r?.data) ? r.data
+        : [];
+
       const list = src.map((m) => {
         const t = m.totals || {};
         return {
@@ -42,127 +109,181 @@ export default function App() {
           slug: m.slug || "",
           title: m.title || "",
           totalUSD: m.totalUSD ?? t.totalUSD ?? 0,
-          buyUSD:   m.buys ?? t.buyUSD ?? 0,
-          sellUSD:  m.sells ?? t.sellUSD ?? 0,
-          uniqueBuyers:  m.uniqueBuyers ?? t.uniqueBuyers ?? 0,
+          buyUSD:   m.buyUSD   ?? m.buys  ?? t.buyUSD  ?? 0,
+          sellUSD:  m.sellUSD  ?? m.sells ?? t.sellUSD ?? 0,
+          uniqueBuyers:  m.uniqueBuyers  ?? t.uniqueBuyers  ?? 0,
           uniqueSellers: m.uniqueSellers ?? t.uniqueSellers ?? 0,
-          activityScore: m.activityScore ?? 0,
-          trades:        m.trades ?? t.trades ?? 0,
+          trades: Number(t.trades ?? m.trades ?? 0) || 0,
+          source: String(m.source || inferSource(m)).toLowerCase(),
         };
       });
+
       setMarkets(list);
-      log({ label: "markets", count: list.length });
-    } catch (e) {
-      const msg = e?.message || String(e);
-      setError(msg); log({ label: "load:error", error: msg });
-    } finally {
+      setBusy(false);
+    } catch (err) {
+      setError(String(err?.message || err));
       setBusy(false);
     }
   }
-
-  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [hours]);
-
-  // Derived/filtered markets for view based on search & team inputs
-  const marketsFiltered = useMemo(() => {
-    const q = (query || "").trim().toLowerCase();
-    const t = (team || "").trim().toLowerCase();
-    return markets.filter(m => {
-      const hay = `${m.title} ${m.slug}`.toLowerCase();
-      const qOk = q ? hay.includes(q) : true;
-      const teamOk = onlyTeam && t ? hay.includes(t) : true;
-      return qOk && teamOk;
-    });
-  }, [markets, query, team, onlyTeam]);
-
-  const selectedMarket = useMemo(
-    () => markets.find((m) => m.conditionId === selectedId) || null,
-    [selectedId, markets]
-  );
+  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [sources]);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      if (!selectedId) { setSelectedDetail(null); return; }
+      if (!selectedId) { setSelectedMarket(null); setSelectedDetail(null); return; }
+      const m = markets.find(x => x.conditionId === selectedId);
+      setSelectedMarket(m || null);
       try {
-        const json = await fetchMarketDetail(selectedId, { hours: 24 });
-        setSelectedDetail(json?.market || null);
-      } catch (e) {
-        log({ label: "detail:error", error: e?.message || String(e) });
-        setSelectedDetail(null);
-      }
+        const d = await fetchMarketDetail(selectedId, { hours: FIXED_HOURS });
+        if (!cancelled) setSelectedDetail(d || null);
+      } catch { if (!cancelled) setSelectedDetail(null); }
     })();
-  }, [selectedId]);
+    return () => { cancelled = true; };
+  }, [selectedId, markets]);
+
+  // --- Alert logic ---
+  const [lastAlertAt, setLastAlertAt] = useState({}); // id -> epoch sec
+  useEffect(() => {
+    let stop = false;
+    async function checkAlerts() {
+      // Build candidate ids from explicit market watchlist + titles containing watched teams
+      const teamTokens = Array.from(watchlistTeams);
+      const teamMatches = markets
+        .filter(m => teamTokens.some(tok => String(m.title || "").toLowerCase().includes(tok)))
+        .map(m => m.conditionId);
+
+      const ids = Array.from(new Set([
+        ...Array.from(watchlistMarkets),
+        ...teamMatches
+      ])).slice(0, 15);
+
+      if (!ids.length) return;
+
+      for (const id of ids) {
+        if (stop) break;
+        try {
+          const d = await fetchMarketDetail(id, { hours: FIXED_HOURS });
+          const trades = d?.trades || d?.market?.trades || [];
+          const bins = minuteBins1h(trades);
+          const { z, last5, mean } = zscore5v30(bins);
+          const now = Math.round(Date.now()/1000);
+          const cooldown = 7 * 60; // 7 minutes
+          const recent = lastAlertAt[id] && (now - lastAlertAt[id] < cooldown);
+          if (!recent && z >= 2.5 && last5 >= 500) {
+            const m = markets.find(x => x.conditionId === id) || { title: id };
+            const title = `Flow spike ↑: ${m.title}`;
+            const body = `5m $${Math.round(last5).toLocaleString()} vs 30m avg $${Math.round(mean).toLocaleString()} (z=${z.toFixed(2)})`;
+            const key = `${id}:${now}`;
+            setAlerts(a => [...a, { id: key, title, body }]);
+            setLastAlertAt(prev => ({ ...prev, [id]: now }));
+          }
+        } catch {}
+      }
+    }
+    const t = setInterval(checkAlerts, 20000);
+    checkAlerts();
+    return () => { stop = true; clearInterval(t); };
+  }, [watchlistMarkets, watchlistTeams, markets, lastAlertAt]);
+
+  const filtered = useMemo(() => {
+    let arr = Array.isArray(markets) ? markets : [];
+    if (onlyWatchlist) {
+      const teamTokens = Array.from(watchlistTeams);
+      arr = arr.filter(m => watchlistMarkets.has(m.conditionId) || teamTokens.some(tok => String(m.title || "").toLowerCase().includes(tok)));
+    }
+    const ht = (query || "").toLowerCase();
+    if (ht) arr = arr.filter(m => String(m.title || "").toLowerCase().includes(ht));
+    return arr;
+  }, [markets, watchlistMarkets, watchlistTeams, onlyWatchlist, query]);
+
+  const watchCount = watchlistMarkets.size + watchlistTeams.size;
 
   return (
     <div className="app-shell">
-      <div className="h1">Redmen — Sports Flow</div>
+      {error && (
+        <div style={{background:"#3b1f1f",border:"1px solid #6b2f2f",color:"#f2c6c6",padding:10,borderRadius:8,marginBottom:12}}>
+          {String(error)}
+        </div>
+      )}
 
-      <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+      <div className="h1">BublDex — Sports Insight</div>
+
+      <div style={{ display:"flex", gap:12, alignItems:"center", marginBottom:12 }}>
+        <SourceToggle selected={sources} onChange={setSources} />
+        <div style={{ marginLeft: "auto", display:"flex", gap:12, alignItems:"center" }}>
+          <label style={{ display:"inline-flex", alignItems:"center", gap:8, color:"#c6cfdb" }}>
+            <input type="checkbox" checked={onlyWatchlist} onChange={e => setOnlyWatchlist(e.target.checked)} />
+            Watchlist only
+          </label>
+          <span style={{ color:"#9fb0c7", fontSize:12 }}>Watch: <strong>{watchCount}</strong></span>
+          <span style={{ color:"#9fb0c7", fontSize:12 }}>Window: <strong>1h</strong></span>
+        </div>
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns: "1fr auto", gap: 12 }}>
+        <input
+          placeholder="Search markets…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          style={{ background:"#0b1520", color:"#e6edf5", border:"1px solid #2b3c52", borderRadius:10, padding:"8px 12px" }}
+        />
+      </div>
+
+      <div style={{ display:"flex", gap:8, marginBottom:12, marginTop:12 }}>
         {VIEWS.map(v => (
           <button
             key={v}
             onClick={() => setView(v)}
             style={{
               padding:"8px 12px", borderRadius:10, border:"1px solid #2b3c52",
-              background: v===view ? "#1b2431" : "#121821",
-              color:"#e8eef5", cursor:"pointer"
+              background: v===view ? "#1b2738" : "transparent",
+              color:"#c6cfdb", fontSize:13, cursor:"pointer"
             }}
-          >{v}</button>
+          >
+            {v}
+          </button>
         ))}
       </div>
 
-      {/* Controls */}
-      <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap", alignItems:"center" }}>
-        <div className="flex items-center gap-2 flex-wrap">
-          <input
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search markets…"
-            style={{ padding:"8px 10px", borderRadius:8, border:"1px solid #2b3c52", background:"#0f1520", color:"#e6edf5", minWidth:220 }}
-          />
-          <HoursToggle value={hours} onChange={setHours} />
-        </div>
-
-        <SmartTeamPicker
-          markets={markets}
-          value={team}
-          onChange={setTeam}
-          onlySelected={onlyTeam}
-          onOnlyChange={setOnlyTeam}
-        />
-    </div>
-
-      {error && <div style={{color:"crimson", marginBottom: 8}}>Error: {error}</div>}
-      {busy && <div style={{opacity:0.7}}>Loading…</div>}
-
-       {view === "List" && (
-   <MarketsList highlightText={team} greyOthers={!team || !onlyTeam ? false : true}
-     markets={marketsFiltered}
-     onSelect={(m) => setSelectedId(m.conditionId)}
-     selectedSlug={selectedId}
-   />
- )}
-
       {view === "Board" && (
-        <div className="section">
-          <BubbleBoard highlightText={team} greyOthers={!team || !onlyTeam ? false : true} markets={marketsFiltered} onSelect={(m) => setSelectedId(m.conditionId)} selectedSlug={selectedId} />
-        </div>
+        <BubbleBoard
+          markets={filtered}
+          onSelect={({ conditionId }) => setSelectedId(conditionId)}
+        />
       )}
 
       {view === "Heatmap" && (
-        <div className="section">
-          <BubbleHeatmap highlightText={team} greyOthers={!team || !onlyTeam ? false : true} markets={marketsFiltered} onSelect={(m) => setSelectedId(m.conditionId)} selectedId={selectedId} />
-        </div>
+        <BubbleHeatmap
+          markets={filtered}
+          onSelect={({ conditionId }) => setSelectedId(conditionId)}
+        />
+      )}
+
+      {view === "List" && (
+        <MarketList
+          markets={filtered}
+          onRowClick={(m) => setSelectedId(m.conditionId)}
+        />
       )}
 
       {selectedMarket && (
         <DetailsModal
           market={selectedMarket}
           detail={selectedDetail}
+          watchlistMarkets={watchlistMarkets}
+          watchlistTeams={watchlistTeams}
+          onToggleWatchMarket={toggleWatchMarket}
+          onToggleWatchTeam={toggleWatchTeam}
+          extractTeamsFromTitle={extractTeamsFromTitle}
           onClose={() => setSelectedId(null)}
         />
       )}
 
-      <DebugPanel open={false} logs={logs} onClear={() => setLogs([])} />
+      <Toaster
+        alerts={alerts}
+        onDismiss={(id) => setAlerts(a => a.filter(x => x.id !== id))}
+      />
+      <DebugPanel open={false} logs={[]} onClear={() => {}} />
     </div>
   );
 }

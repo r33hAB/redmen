@@ -5,7 +5,7 @@ import { splitFrom, usd, fmtPct, num } from "../lib/metrics";
 export default function ListView({ markets = [], onRowClick, highlightText = "", greyOthers = false }) {
   const ht = (highlightText||"").toLowerCase();
   const rows = markets
-    .map((m) => ({ m, ...splitFrom(m) }))
+    .map((m) => ({ m, ...splitFrom(m), source: (m.source || m.__source || 'unknown').toLowerCase() }))
     .sort((a, b) => b.total - a.total);
 
   return (
@@ -22,7 +22,7 @@ export default function ListView({ markets = [], onRowClick, highlightText = "",
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ m, buy, sell, total }, i) => {
+          {rows.map(({ m, buy, sell, total, source }, i) => {
             const denom = buy + sell;
             const buyPct  = denom > 0 ? (buy / denom) * 100 : 50;
             const sellPct = denom > 0 ? 100 - buyPct : 50;
@@ -38,7 +38,13 @@ export default function ListView({ markets = [], onRowClick, highlightText = "",
                 style={{ cursor: "pointer" }}
               >
                 <td style={tdR}>{i + 1}</td>
-                <td style={tdL}>{m.title || m.question || m.name}</td>
+                <td style={tdL}>{m.title || m.question || m.name}
+                    <span style={{
+                      marginLeft:8, fontSize:11, padding:"3px 6px", borderRadius:9999,
+                      border:"1px solid rgba(255,255,255,.08)",
+                      background: (source === "kalshi") ? "rgba(245,158,11,.15)" : (source === "polymarket" ? "rgba(59,130,246,.15)" : "rgba(148,163,184,.15)"),
+                      color: (source === "kalshi") ? "#f59e0b" : (source === "polymarket" ? "#60a5fa" : "#94a3b8")
+                    }}>{(source === "kalshi") ? "Kalshi" : (source === "polymarket" ? "Polymarket" : "Unknown")}</span></td>
                 <td style={tdR}>{usd(total)}</td>
                 <td style={tdR}>{fmtPct(buyPct)} / {fmtPct(sellPct)}</td>
                 <td style={tdR}>{uBuy}/{uSell}</td>

@@ -1,0 +1,19 @@
+// Minimal patch: ensure rows include trades and switch tail text for Kalshi
+// Apply this diff into your existing BubbleBoard.jsx near where rows are built and captions are rendered.
+// 1) When pushing each market row, include `trades`:
+/*
+out.push({
+  id,
+  // ...
+  uniqueBuyers: Number(m?.uniqueBuyers ?? m?.totals?.uniqueBuyers ?? 0),
+  uniqueSellers: Number(m?.uniqueSellers ?? m?.totals?.uniqueSellers ?? 0),
+  trades: Number(m?.trades ?? m?.totals?.trades ?? 0),
+  // ...
+});
+*/
+// 2) In the caption line under the ring, use trades for Kalshi:
+/*
+const isKalshi = r.source === "kalshi";
+const uniqueText = `${r.uniqueBuyers}/${r.uniqueSellers}`;
+const tail = isKalshi ? `• trades ${r.trades}` : `• ${uniqueText}`;
+*/

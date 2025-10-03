@@ -79,7 +79,8 @@ export async function fetchMarkets(params = {}) {
     limit: String(params.limit ?? 1000),
     offset: String(params.offset ?? 0),
   });
-  return getJson(`${FEED}/markets?${qs.toString()}`);
+  if (params.source) { qs.set('source', String(params.source)); }
+return getJson(`${FEED}/markets?${qs.toString()}`);
 }
 
 export async function fetchMarket(id, params = {}) {
