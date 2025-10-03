@@ -1,11 +1,5 @@
 // src/lib/badge.js
-// Helpers & labels for Kalshi + Polymarket.
-// Exports used across the app:
-//   - extractTeamsFromTitle
-//   - kalshiYesTeam
-//   - kalshiGroupKey   <-- required by BubbleBoard
-//   - sourceBadge / sourceBadgeShort
-//   - yesNoLabels
+// Unified helpers for source badges and outcome labels (Kalshi + Polymarket).
 
 function sanitizeToken(token = "") {
   let t = String(token || "").trim();
@@ -72,13 +66,11 @@ export function kalshiYesTeam(market) {
   return mapped || code || "Yes";
 }
 
-// --- missing earlier; BubbleBoard imports this ---
 export function kalshiGroupKey(market) {
   const s = String(market?.conditionId || market?.slug || "");
   if (!s) return "";
   const parts = s.split("-").map((x) => x.trim()).filter(Boolean);
   if (parts.length <= 1) return s;
-  // Drop the final token (typically YES code like SF/NYK etc.)
   return parts.slice(0, -1).join("-");
 }
 
@@ -99,11 +91,7 @@ export function sourceBadgeShort(market) {
   if (s === "kalshi") {
     const team = kalshiYesTeam(market);
     const init = (team || "")
-      .split(/\s+/)
-      .map((w) => w[0])
-      .join("")
-      .slice(0, 3)
-      .toUpperCase() || "YES";
+      .split(/\s+/).map((w) => w[0]).join("").slice(0,3).toUpperCase() || "YES";
     return `K-YES ${init}`;
   }
   if (s === "polymarket") return "PM";
@@ -119,16 +107,15 @@ export function yesNoLabels(market) {
   // Two-team statement like "A vs B"
   if (teams.length >= 2) {
     if (src === "kalshi") {
-      // Kalshi markets are YES on one side; show YES team vs opponent
       const yesTeam = kalshiYesTeam(market);
       const noTeam = teams.find((t) => String(t) !== String(yesTeam)) || "No";
       return { yes: yesTeam, no: noTeam };
     }
-    // Polymarket or unknown -> treat Yes=A, No=B
+    // Polymarket or unknown -> Yes=A, No=B
     return { yes: teams[0], no: teams[1] };
   }
 
-  // Single-team proposition ("Will <Team> win ...?") => literal Yes/No
+  // Single-team proposition ("Will <Team> win ...?") => show literal Yes/No
   if (teams.length === 1 && /^will\s/i.test(title)) {
     return { yes: "Yes", no: "No" };
   }
