@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { fetchSportsEvents, fetchMarketDetail } from "./lib/api.js";
+import UserTab from "./components/UserTab.jsx";
+import Highlights from "./components/Highlights.jsx";
 
 import DebugPanel from "./components/DebugPanel.jsx";
 import BubbleBoard from "./components/BubbleBoard.jsx";
@@ -10,7 +12,7 @@ import MarketList from "./components/MarketList.jsx";
 import Toaster from "./components/Toaster.jsx";
 import { minuteBins1h, zscore5v30 } from "./lib/bucket.js";
 
-const VIEWS = ["Board", "Heatmap", "List"];
+const VIEWS = ["Board","Heatmap","List","Highlights","User"];
 const FIXED_HOURS = 1;
 
 // heuristic: extract team-like tokens from a title
@@ -284,6 +286,18 @@ export default function App() {
         onDismiss={(id) => setAlerts(a => a.filter(x => x.id !== id))}
       />
       <DebugPanel open={false} logs={[]} onClear={() => {}} />
-    </div>
+    
+{view === "Highlights" && (
+  <div style={{display:"grid", gap:12}}>
+    <Highlights hours={1} />
+  </div>
+)}
+
+{view === "User" && (
+  <div style={{display:"grid", gap:12}}>
+    <UserTab />
+  </div>
+)}
+</div>
   );
 }
