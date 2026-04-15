@@ -3,8 +3,8 @@ import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
 
-// Default Cloud Run URL; override in dev with VITE_FEED_PROXY_TARGET
-const DEFAULT_TARGET = 'CLOUD_RUN_URL_PLACEHOLDER'
+// Set VITE_FEED_PROXY_TARGET in your .env to your Cloud Run URL
+const DEFAULT_TARGET = 'http://localhost:8080'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')

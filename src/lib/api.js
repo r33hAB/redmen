@@ -23,9 +23,8 @@ function resolveFeedBase() {
     /\.web\.app$/.test(location.hostname) ||
     /\.firebaseapp\.com$/.test(location.hostname);
 
-  // Absolute daemon (your live url)
-  const ABSOLUTE_DAEMON =
-    "CLOUD_RUN_URL_PLACEHOLDER";
+  // Absolute daemon — set VITE_FEED_BASE in .env.production to your Cloud Run URL
+  const ABSOLUTE_DAEMON = "";
 
   // Priority: query param > env > meta > fallback
   let base = qpBase || envBase || metaBase || (onFirebase ? ABSOLUTE_DAEMON : "/feed");

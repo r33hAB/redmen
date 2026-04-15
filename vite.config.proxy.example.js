@@ -4,7 +4,7 @@ export default {
   server: {
     proxy: {
       '/feed': {
-        target: ' CLOUD_RUN_URL_PLACEHOLDER/',
+        target: process.env.VITE_FEED_PROXY_TARGET || 'http://localhost:8080',
         changeOrigin: true,
         secure: true,
       },
